@@ -1,10 +1,10 @@
-# forme
+# caulk
 
 Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 
 **Purpose:** typed prompt registry (`State × Event → Prompt`), pluggable context builder trait, generic policy trait (allowed tools per `State`). No teaching logic. Planners stay in product layer, not in library.
 
-`caulk` is a publishing word — an archaic printing term meaning a form locked ready to press. `caulk` is free (404 on crates.io) candidate.
+`forme` was - `caulk` is the filler that locks the form ready to press. `caulk` is free — an archaic printing term meaning a form locked ready to press. `caulk` is free (404 on crates.io) candidate.
 
 ## Quick start
 
