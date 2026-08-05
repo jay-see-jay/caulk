@@ -16,6 +16,7 @@ pub mod rig_adapter;
 pub mod runtime;
 
 pub use core::{Event, FormeError, PromptKey, State, ToolId};
+pub use runtime::{NextAction, Runner, StepOutput, ToolPlan};
 
 /// Re-exported version string
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
