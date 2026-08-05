@@ -11,7 +11,7 @@
 //! - Inkwell cares about **paragraph history** (last 3 paragraphs)
 //! - Generic users may want noop or concat.
 //!
-//! By keeping `ContextBuilder<E>: Send + Sync` generic, the `forme`
+//! By keeping `ContextBuilder<E>: Send + Sync` generic, the `caulk`
 //! runtime stays product-agnostic. Products implement or compose builders
 //! without branching core. This also mirrors `Policy<S>` and `LlmAdapter<E>`
 //! design.

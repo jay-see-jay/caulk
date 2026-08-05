@@ -1,4 +1,4 @@
-//! forme — thin generic runtime between rig-core and graph-flow
+//! caulk — thin generic runtime between rig-core and graph-flow
 //! Wave 0: core — Event, State, PromptKey, FormeError
 //!
 //! Destination: typed prompt registry (State × Event → Prompt), pluggable

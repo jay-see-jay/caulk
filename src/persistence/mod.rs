@@ -72,7 +72,7 @@ where
 ///
 /// Example:
 /// ```
-/// use forme::persistence::{Checkpointer, InMemoryCheckpointer};
+/// use caulk::persistence::{Checkpointer, InMemoryCheckpointer};
 /// use serde::{Deserialize, Serialize};
 /// use std::fmt;
 ///

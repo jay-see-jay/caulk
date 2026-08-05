@@ -6,7 +6,7 @@ use thiserror::Error;
 
 // ── Traits ──────────────────────────────────────────────────────────────
 
-/// User-defined event for the forme state machine.
+/// User-defined event for the caulk state machine.
 ///
 /// # Object-safety
 /// This trait is **NOT** object-safe: it requires `Clone` (which returns `Self`)
@@ -25,7 +25,7 @@ impl<T> Event for T where
 {
 }
 
-/// User-defined state for the forme state machine.
+/// User-defined state for the caulk state machine.
 ///
 /// # Object-safety
 /// NOT object-safe for the same reasons as `Event` (`Clone` returns `Self`,
@@ -146,7 +146,7 @@ impl AsRef<str> for ToolId {
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
-/// Core error type for forme — zero I/O, just data.
+/// Core error type for caulk — zero I/O, just data.
 #[derive(Debug, Error)]
 pub enum FormeError {
     #[error("prompt not found for {0}")]

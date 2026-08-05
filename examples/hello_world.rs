@@ -1,4 +1,4 @@
-//! hello_world — minimal generic example for `forme`
+//! hello_world — minimal generic example for `caulk`
 //!
 //! * State = Idle / Done
 //! * Event = UserMsg
@@ -15,11 +15,11 @@
 //! Generic outside Ferriswheel / Inkwell / Loom, deterministic output
 //! suitable for snapshot to `tests/snapshots/hello-world.txt`.
 
-use forme::context_builder::NoopBuilder;
-use forme::policy::AllowAllPolicy;
-use forme::prompt_registry::InMemoryRegistry;
-use forme::rig_adapter::MockLlm;
-use forme::{PromptKey, Runner};
+use caulk::context_builder::NoopBuilder;
+use caulk::policy::AllowAllPolicy;
+use caulk::prompt_registry::InMemoryRegistry;
+use caulk::rig_adapter::MockLlm;
+use caulk::{PromptKey, Runner};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -96,7 +96,7 @@ fn main() {
     // ── builder / policy / llm ────────────────────────────────────────────
     let builder = NoopBuilder;
     let policy = AllowAllPolicy;
-    let llm = MockLlm::with_response("Hello from forme! This is canned reply.");
+    let llm = MockLlm::with_response("Hello from caulk! This is canned reply.");
 
     // ── runner ────────────────────────────────────────────────────────────
     let runner = Runner::new(Arc::new(registry), Arc::new(builder), Arc::new(policy), llm);
@@ -109,7 +109,7 @@ fn main() {
     let key = PromptKey::key_for(&state, &event);
     let done_key = PromptKey::key_for(&AppState::Done, &event);
 
-    println!("--- forme hello_world ---");
+    println!("--- caulk hello_world ---");
     println!("State: {state}");
     println!("Event: {event}");
     println!("PromptKey via key_for: {key}");

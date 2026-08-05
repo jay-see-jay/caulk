@@ -4,7 +4,7 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 
 **Purpose:** typed prompt registry (`State × Event → Prompt`), pluggable context builder trait, generic policy trait (allowed tools per `State`). No teaching logic. Planners stay in product layer, not in library.
 
-`forme` is a publishing word — an archaic printing term meaning a form locked ready to press. `forme` is free (404 on crates.io) candidate.
+`caulk` is a publishing word — an archaic printing term meaning a form locked ready to press. `caulk` is free (404 on crates.io) candidate.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ use std::{collections::HashMap, sync::Arc};
   - `RigAgentAdapter<A>` wraps `rig_agent::Agent` via `Prompt` trait
   - `RigAgentFactory<C,M>` recreates `client.agent(model).preamble(&prompt).build()` per step → `into_adapter()`
   - enable with `--features rig` (needs `rig-core = 0.41`, `rig = 0.41`, `rig-agent = 0.41`)
-* `graph-flow` — typed `forme` → `graph-flow` bridge (optional)
+* `graph-flow` — typed `caulk` → `graph-flow` bridge (optional)
   - `FormeGraphBuilder<S>` wraps `graph_flow::GraphBuilder`, keeps `S: State` typed
   - `From<NextAction<S>> for graph_flow::NextAction` maps `Next/Continue→Continue`, `Branch/Transition→GoTo`, `Halt→End`
   - `FormeTask<S,E,R,B,P,L>` `Task` impl running `Runner::prepare` (deterministic) and storing prompt/context/tools into `graph_flow::Context`
@@ -76,7 +76,7 @@ Each wave must pass `cargo test` before next.
 
 ## Crates.io ready
 
-- name: `forme` (still free candidate)
+- name: `caulk` (still free candidate)
 - description: "Thin generic runtime between rig-core and graph-flow — typed prompt registry (State x Event), pluggable context builder, policy allowlist"
 - license: `MIT OR Apache-2.0`
 - keywords: `llm, agent, rig, prompt, state-machine`

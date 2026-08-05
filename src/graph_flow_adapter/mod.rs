@@ -1,13 +1,13 @@
-//! graph_flow_adapter — bridge `forme` runtime into `graph-flow` workflows
+//! graph_flow_adapter — bridge `caulk` runtime into `graph-flow` workflows
 //!
-//! Wave 5: typed `forme` `State`/`Event` → `graph-flow` `GraphBuilder`/`Task`.
+//! Wave 5: typed `caulk` `State`/`Event` → `graph-flow` `GraphBuilder`/`Task`.
 //!
 //! ## Design
 //!
 //! * `FormeGraphBuilder<S>` — thin wrapper over `graph_flow::GraphBuilder`
 //!   that preserves typed-state semantics while delegating edge/task registration.
-//! * `From<forme::runtime::NextAction<S>> for graph_flow::NextAction` — the
-//!   push-model transition: forme decides `Next/Continue/Branch/Transition/Halt`,
+//! * `From<caulk::runtime::NextAction<S>> for graph_flow::NextAction` — the
+//!   push-model transition: caulk decides `Next/Continue/Branch/Transition/Halt`,
 //!   graph-flow executes `Continue/GoTo/End`.
 //! * `FormeTask<S,E,R,B,P,L>` — `graph_flow::Task` impl that runs
 //!   `Runner::prepare(state, event, history)` deterministically inside the
@@ -43,7 +43,7 @@ mod inner {
     /// Preserves `S: State` type parameter so callers can't accidentally mix
     /// graphs from different products (Ferriswheel vs Inkwell etc) without it
     /// being visible in type signatures. Underlying builder is untyped (string
-    /// task ids), as is `graph-flow` itself — this wrapper keeps the forme
+    /// task ids), as is `graph-flow` itself — this wrapper keeps the caulk
     /// flavor without fighting the library.
     ///
     /// Example:
@@ -51,8 +51,8 @@ mod inner {
     /// # #[cfg(feature = "graph-flow")]
     /// # {
     /// use std::sync::Arc;
-    /// use forme::graph_flow_adapter::FormeGraphBuilder;
-    /// use forme::core::State;
+    /// use caulk::graph_flow_adapter::FormeGraphBuilder;
+    /// use caulk::core::State;
     /// use serde::{Serialize, Deserialize};
     ///
     /// #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ mod inner {
             }
         }
 
-        /// Convenience: add a forme task wrapping a `Runner`.
+        /// Convenience: add a caulk task wrapping a `Runner`.
         pub fn add_state_task<E, R, B, P, L>(self, task: Arc<FormeTask<S, E, R, B, P, L>>) -> Self
         where
             E: Event,
@@ -182,13 +182,13 @@ mod inner {
     // NextAction conversion
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Map forme's minimal `NextAction<S>` → graph-flow's richer `NextAction`.
+    /// Map caulk's minimal `NextAction<S>` → graph-flow's richer `NextAction`.
     ///
     /// * `Next | Continue` → `Continue` (step-by-step, caller drives)
     /// * `Branch(S) | Transition(S)` → `GoTo(<state>.to_string())`
     /// * `Halt` → `End`
     ///
-    /// `ContinueAndExecute` is not a forme concept — callers who want it can
+    /// `ContinueAndExecute` is not a caulk concept — callers who want it can
     /// construct `graph_flow::NextAction::ContinueAndExecute` manually for a step.
     impl<S> From<FormeNextAction<S>> for GfNextAction
     where
@@ -207,7 +207,7 @@ mod inner {
 
     /// Helper to convert with explicit handling: if caller needs `ContinueAndExecute`
     /// for `Next` they can use this.
-    pub fn forme_next_to_gf<S>(act: FormeNextAction<S>, eager: bool) -> GfNextAction
+    pub fn caulk_next_to_gf<S>(act: FormeNextAction<S>, eager: bool) -> GfNextAction
     where
         S: State,
     {
@@ -233,7 +233,7 @@ mod inner {
     /// The task's `run` method:
     /// 1. Calls `runner.prepare(&state, &event, &history)` (pure, no I/O)
     /// 2. Stores `prompt`, `context`, `tool_plan` into `graph_flow::Context`
-    /// 3. Returns `TaskResult` with `NextAction` converted from `forme` to graph-flow.
+    /// 3. Returns `TaskResult` with `NextAction` converted from `caulk` to graph-flow.
     ///
     /// LLM calling is deferred to a separate task or `FormeLlmTask` if needed.
     pub struct FormeTask<S, E, R, B, P, L>
@@ -262,7 +262,7 @@ mod inner {
         P: Policy<S>,
         L: LlmAdapter<E>,
     {
-        /// Create a new forme task.
+        /// Create a new caulk task.
         ///
         /// `id` defaults to `state.to_string()` if not supplied via `with_id`.
         pub fn new(runner: Arc<Runner<S, E, R, B, P, L>>, state: S, event: E) -> Self {
@@ -350,26 +350,26 @@ mod inner {
                 .prepare(&self.state, &self.event, &self.history)
                 .map_err(|e: FormeError| {
                     graph_flow::GraphError::TaskExecutionFailed(format!(
-                        "forme prepare failed ({}): {}",
+                        "caulk prepare failed ({}): {}",
                         self.id, e
                     ))
                 })?;
 
             // Surface prepared data into shared Context for downstream tasks / LLM
             // Ignore errors from context.set (unlikely) — map to GraphError.
-            if let Err(e) = context.set("forme.prompt", prepared.prompt.clone()) {
+            if let Err(e) = context.set("caulk.prompt", prepared.prompt.clone()) {
                 return Err(graph_flow::GraphError::TaskExecutionFailed(format!(
                     "context set prompt failed: {}",
                     e
                 )));
             }
-            if let Err(e) = context.set("forme.context", prepared.context.clone()) {
+            if let Err(e) = context.set("caulk.context", prepared.context.clone()) {
                 return Err(graph_flow::GraphError::TaskExecutionFailed(format!(
                     "context set context failed: {}",
                     e
                 )));
             }
-            if let Err(e) = context.set("forme.prompt_key", prepared.key.canonical()) {
+            if let Err(e) = context.set("caulk.prompt_key", prepared.key.canonical()) {
                 return Err(graph_flow::GraphError::TaskExecutionFailed(format!(
                     "context set prompt_key failed: {}",
                     e
@@ -384,11 +384,11 @@ mod inner {
                     .collect::<Vec<_>>(),
             )
             .unwrap_or_else(|_| "[]".to_string());
-            let _ = context.set("forme.tools", tools_json);
+            let _ = context.set("caulk.tools", tools_json);
 
             // Also record state/event for observability
-            let _ = context.set("forme.state", self.state.to_string());
-            let _ = context.set("forme.event", self.event.to_string());
+            let _ = context.set("caulk.state", self.state.to_string());
+            let _ = context.set("caulk.event", self.event.to_string());
 
             let gf_next: GfNextAction = self.next.clone().into();
 
@@ -498,15 +498,15 @@ mod inner {
                 .await
                 .map_err(|e| {
                     graph_flow::GraphError::TaskExecutionFailed(format!(
-                        "forme step failed ({}): {}",
+                        "caulk step failed ({}): {}",
                         self.id, e
                     ))
                 })?;
 
-            let _ = context.set("forme.prompt", out.prompt.clone());
-            let _ = context.set("forme.context", out.context.clone());
-            let _ = context.set("forme.response", out.llm_response.clone());
-            let _ = context.set("forme.state", out.next_state.to_string());
+            let _ = context.set("caulk.prompt", out.prompt.clone());
+            let _ = context.set("caulk.context", out.context.clone());
+            let _ = context.set("caulk.response", out.llm_response.clone());
+            let _ = context.set("caulk.state", out.next_state.to_string());
 
             let gf_next: GfNextAction = self.next.clone().into();
 
@@ -600,8 +600,8 @@ mod tests {
                 (FormeNextAction::Halt, GfNextAction::End),
             ];
 
-            for (forme_a, expected_gf) in cases {
-                let gf: GfNextAction = forme_a.into();
+            for (caulk_a, expected_gf) in cases {
+                let gf: GfNextAction = caulk_a.into();
                 assert_eq!(gf, expected_gf);
             }
         }
@@ -638,7 +638,7 @@ mod tests {
         }
 
         #[test]
-        fn forme_task_prepare_runs() {
+        fn caulk_task_prepare_runs() {
             // Prepare data
             let mut map = HashMap::new();
             map.insert(PromptKey::new("Idle", "Hello"), "hello prompt".into());
@@ -661,7 +661,7 @@ mod tests {
             assert!(out.response.unwrap().contains("Idle::Hello"));
 
             // Context got populated
-            let prompt: Option<String> = ctx.get("forme.prompt");
+            let prompt: Option<String> = ctx.get("caulk.prompt");
             assert_eq!(prompt.as_deref(), Some("hello prompt"));
         }
     }

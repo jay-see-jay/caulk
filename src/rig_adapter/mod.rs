@@ -10,7 +10,7 @@
 //! adapter behaviour per event shape, but the LLM call itself is just
 //! `prompt + context → completion`. Making the adapter generic over `E`
 //! lets a product provide an event-specific policy while the core runtime
-//! (`forme`) stays unaware of product events.
+//! (`caulk`) stays unaware of product events.
 //!
 //! This mirrors how `ContextBuilder<E>` and `Policy<S>` are generic.
 //! `MockLlm` implements `LlmAdapter<E>` for *any* `E`, so tests stay generic.
@@ -150,7 +150,7 @@ pub mod rig {
     //!   uses the classic `Prompt` trait (`agent.prompt(text).await`).
     //!
     //! Both implement `LlmAdapter<E>` for any `E: Event`, keeping the generic
-    //! forme runtime unaware of the underlying provider.
+    //! caulk runtime unaware of the underlying provider.
 
     use std::sync::Arc;
 
@@ -187,7 +187,7 @@ pub mod rig {
         /// # {
         /// use rig_core::client::{CompletionClient, ProviderClient};
         /// use rig_core::providers::openai;
-        /// use forme::rig_adapter::rig::RigModelAdapter;
+        /// use caulk::rig_adapter::rig::RigModelAdapter;
         ///
         /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
         /// let client = openai::Client::from_env()?;
@@ -313,17 +313,17 @@ pub mod rig {
     /// # #[cfg(feature = "rig")]
     /// # {
     /// use std::sync::Arc;
-    /// use forme::rig_adapter::rig::ClosureAdapter;
+    /// use caulk::rig_adapter::rig::ClosureAdapter;
     ///
-    /// # async fn example(agent: Arc<rig::Agent<rig::providers::openai::CompletionModel>>) -> forme::core::FormeError {
+    /// # async fn example(agent: Arc<rig::Agent<rig::providers::openai::CompletionModel>>) -> caulk::core::FormeError {
     /// let adapter = ClosureAdapter::from_fn(move |prompt, context| {
     ///     let agent = Arc::clone(&agent);
     ///     async move {
-    ///         // Merge forme prompt (system) + context (user) into agent call:
+    ///         // Merge caulk prompt (system) + context (user) into agent call:
     ///         // simplest: ignore prompt as preamble already baked, or recreate agent per-call.
     ///         // Here we just prompt with context, falling back to prompt if empty.
     ///         let user = if context.is_empty() { prompt } else { context };
-    ///         agent.prompt(user).await.map_err(|e| forme::core::FormeError::LlmFailed(e.to_string()))
+    ///         agent.prompt(user).await.map_err(|e| caulk::core::FormeError::LlmFailed(e.to_string()))
     ///     }
     /// });
     /// # unreachable!()
@@ -385,7 +385,7 @@ pub mod rig {
 
     /// Wrapper over a `rig_agent::Agent` (or `rig::Agent`) using its `Prompt` trait.
     ///
-    /// This adapter bakes the forme `prompt` as preamble only when empty agent
+    /// This adapter bakes the caulk `prompt` as preamble only when empty agent
     /// already has no preamble? For simplicity, if `context` is non-empty it prompts
     /// with `context`, otherwise with `prompt`. Users needing per-call preamble
     /// rebuild should use `RigModelAdapter` or `ClosureAdapter` with a factory
@@ -463,7 +463,7 @@ pub mod rig {
 
     /// Factory that recreates a Rig agent per call with `preamble = prompt`.
     ///
-    /// Useful when your forme `prompt` changes per State×Event and you need
+    /// Useful when your caulk `prompt` changes per State×Event and you need
     /// a fresh Rig agent with that preamble each step.
     ///
     /// ```no_run
@@ -472,12 +472,12 @@ pub mod rig {
     /// use std::sync::Arc;
     /// use rig::client::{CompletionClient, ProviderClient};
     /// use rig::providers::openai;
-    /// use forme::rig_adapter::rig::RigAgentFactory;
+    /// use caulk::rig_adapter::rig::RigAgentFactory;
     ///
     /// # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = openai::Client::from_env()?;
     /// let factory = RigAgentFactory::new(client.clone(), openai::GPT_5_2);
-    /// // forme runtime will call `factory.call(prompt, context)` internally via LlmAdapter
+    /// // caulk runtime will call `factory.call(prompt, context)` internally via LlmAdapter
     /// # Ok(())
     /// # }
     /// # }
@@ -514,7 +514,7 @@ pub mod rig {
     {
         /// Convert into a `ClosureAdapter` suitable for `Runner`.
         ///
-        /// Each forme step rebuilds a fresh Rig agent with `preamble = prompt`
+        /// Each caulk step rebuilds a fresh Rig agent with `preamble = prompt`
         /// (the system) and prompts with `context` (user), falling back to
         /// `prompt` when context empty.
         pub fn into_adapter(self) -> ClosureAdapter {
@@ -528,7 +528,7 @@ pub mod rig {
                     } else {
                         context.clone()
                     };
-                    // Recreate agent per call so preamble = prompt (forme system)
+                    // Recreate agent per call so preamble = prompt (caulk system)
                     let agent = factory
                         .client
                         .agent(factory.model_name.clone())

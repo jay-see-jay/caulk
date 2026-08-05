@@ -13,12 +13,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use forme::context_builder::{ContextBuilder, ParagraphBuilder};
-use forme::core::{FormeError, PromptKey, ToolId};
-use forme::policy::Policy;
-use forme::prompt_registry::InMemoryRegistry;
-use forme::rig_adapter::MockLlm;
-use forme::runtime::{NextAction, Runner};
+use caulk::context_builder::{ContextBuilder, ParagraphBuilder};
+use caulk::core::{FormeError, PromptKey, ToolId};
+use caulk::policy::Policy;
+use caulk::prompt_registry::InMemoryRegistry;
+use caulk::rig_adapter::MockLlm;
+use caulk::runtime::{NextAction, Runner};
 use serde::{Deserialize, Serialize};
 
 // ── State ─────────────────────────────────────────────────────────────────

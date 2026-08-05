@@ -180,7 +180,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let pid: u32 = std::process::id();
-        let name: String = format!("forme_registry_{}_{}_{}", pid, nanos, suffix);
+        let name: String = format!("caulk_registry_{}_{}_{}", pid, nanos, suffix);
         let path: PathBuf = base.join(name);
         let _ = fs::create_dir_all(&path);
         path

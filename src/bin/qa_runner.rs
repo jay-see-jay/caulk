@@ -1,4 +1,4 @@
-//! qa_runner — Wave 4 QA checks for `forme`
+//! qa_runner — Wave 4 QA checks for `caulk`
 //!
 //! Implements CLI that:
 //! - Loads `tests/fixtures/event-log.json` if present, else in-memory log
@@ -11,12 +11,12 @@
 //! - Prints PASS/FAIL per check and overall
 //! - Exit 0 on success
 
-use forme::context_builder::NoopBuilder;
-use forme::core::{FormeError, PromptKey, ToolId};
-use forme::policy::{AllowAllPolicy, AllowListPolicy, Policy};
-use forme::prompt_registry::{InMemoryRegistry, Registry};
-use forme::rig_adapter::MockLlm;
-use forme::Runner;
+use caulk::context_builder::NoopBuilder;
+use caulk::core::{FormeError, PromptKey, ToolId};
+use caulk::policy::{AllowAllPolicy, AllowListPolicy, Policy};
+use caulk::prompt_registry::{InMemoryRegistry, Registry};
+use caulk::rig_adapter::MockLlm;
+use caulk::Runner;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -84,7 +84,7 @@ fn load_event_log() -> Vec<LogEntry> {
     let candidates = [
         "tests/fixtures/event-log.json",
         "./tests/fixtures/event-log.json",
-        "forme/tests/fixtures/event-log.json",
+        "caulk/tests/fixtures/event-log.json",
     ];
     for cand in candidates {
         if Path::new(cand).exists() {
@@ -151,7 +151,7 @@ fn main() {
     let registry = Arc::new(make_registry());
     let builder = Arc::new(NoopBuilder);
     let policy = Arc::new(AllowAllPolicy);
-    let llm = MockLlm::with_response("Hello from forme! This is canned reply.");
+    let llm = MockLlm::with_response("Hello from caulk! This is canned reply.");
 
     let runner = Runner::new(
         Arc::clone(&registry),
@@ -316,7 +316,7 @@ fn main() {
         let snapshot_paths = [
             "tests/snapshots/hello-world.txt",
             "./tests/snapshots/hello-world.txt",
-            "forme/tests/snapshots/hello-world.txt",
+            "caulk/tests/snapshots/hello-world.txt",
         ];
         let mut found_path = None;
         let mut content = String::new();
@@ -340,7 +340,7 @@ fn main() {
             let has_prompt_or_hello = content.contains("prompt")
                 || content.contains("Hello")
                 || content.contains("hello")
-                || content.contains("forme");
+                || content.contains("caulk");
             let plausible = len > 10 && (has_idle || has_prompt_or_hello || len > 50);
 
             // Also run hello_world simulation and ensure our prepared prompt could be contained or at least similar length
@@ -356,7 +356,7 @@ fn main() {
                     Arc::new(reg),
                     Arc::new(NoopBuilder),
                     Arc::new(AllowAllPolicy),
-                    MockLlm::with_response("Hello from forme! This is canned reply."),
+                    MockLlm::with_response("Hello from caulk! This is canned reply."),
                 );
                 let st = AppState::new("Idle");
                 let ev = AppEvent::new("UserMsg");

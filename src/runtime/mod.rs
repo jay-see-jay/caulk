@@ -381,7 +381,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let pid = std::process::id();
-        let name = format!("forme_runtime_{}_{}_{}", pid, nanos, suffix);
+        let name = format!("caulk_runtime_{}_{}_{}", pid, nanos, suffix);
         let path = base.join(name);
         let _ = fs::create_dir_all(&path);
         path
