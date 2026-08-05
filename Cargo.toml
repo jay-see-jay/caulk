@@ -1,0 +1,40 @@
+[package]
+name = "forme"
+version = "0.1.0"
+edition = "2021"
+description = "Thin generic runtime between rig-core and graph-flow — typed prompt registry (State x Event), pluggable context builder, policy allowlist"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["llm", "agent", "rig", "prompt", "state-machine"]
+categories = ["asynchronous"]
+
+[dependencies]
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"], optional = true }
+
+[dev-dependencies]
+# tokio added in Wave 3
+
+[features]
+default = []
+rig = []
+graph-flow = []
+full = ["rig", "graph-flow"]
+
+[lib]
+name = "forme"
+path = "src/lib.rs"
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+
+[[example]]
+name = "support_bot"
+path = "examples/support_bot.rs"
+
+[[bin]]
+name = "qa_runner"
+path = "src/bin/qa_runner.rs"
