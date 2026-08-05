@@ -8,9 +8,12 @@
 
 pub mod context_builder;
 pub mod core;
+pub mod graph_flow_adapter;
 pub mod persistence;
 pub mod policy;
 pub mod prompt_registry;
+pub mod rig_adapter;
+pub mod runtime;
 
 pub use core::{Event, FormeError, PromptKey, State, ToolId};
 
