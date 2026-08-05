@@ -1,0 +1,8 @@
+hello-world snapshot
+state=Idle event=UserMsg
+prompt: You are in Idle state, greeting user. You are helpful.
+context:
+llm: Hello, world! This is forme.
+tool_plan: []
+
+This file is initial placeholder — real content will be overwritten by coordination step after hello_world example finalized.

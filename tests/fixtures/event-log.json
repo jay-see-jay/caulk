@@ -1,0 +1,22 @@
+[
+    {
+        "event": "UserMsg",
+        "history": [],
+        "state": "Idle"
+    },
+    {
+        "event": "UserMsg",
+        "history": [
+            "UserMsg"
+        ],
+        "state": "Greeting"
+    },
+    {
+        "event": "UserMsg",
+        "history": [
+            "UserMsg",
+            "UserMsg"
+        ],
+        "state": "Done"
+    }
+]
