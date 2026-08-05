@@ -13,14 +13,19 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"], optional = true }
+rig-core = { version = "0.41", optional = true }
+rig = { version = "0.41", optional = true }
+rig-agent = { version = "0.41", optional = true }
+graph-flow = { version = "0.6", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
-# tokio added in Wave 3
+tokio = { version = "1.0", features = ["full"] }
 
 [features]
 default = []
-rig = []
-graph-flow = []
+rig = ["dep:rig-core", "dep:rig", "dep:rig-agent", "dep:tokio", "tokio/full", "dep:async-trait"]
+graph-flow = ["dep:graph-flow", "dep:tokio", "dep:async-trait", "tokio/full"]
 full = ["rig", "graph-flow"]
 
 [lib]
