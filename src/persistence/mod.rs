@@ -1,9 +1,24 @@
-//! persistence — Wave 1: `Checkpointer` trait, single state vector.
+//! persistence — `Checkpointer` trait + `InMemoryCheckpointer`
 //!
-//! Scope: trait only. No `InMemoryCheckpointer` (Wave 2), no Postgres (Wave 3).
-//! The simplest model — one slot storing the latest `S` — covers single-agent
-//! execution. Future extension: keyed persistence for multi-workflow /
-//! multi-tenant state (e.g. `save_for(key, state)` / `load_for(key)`).
+//! Wave 1: trait single state vector. Wave 2: `InMemoryCheckpointer` with
+//! `Arc<RwLock<Option<S>>>` shared storage, Clone sharing, round-trip.
+//!
+//! Why `Arc<RwLock>` not `Mutex`?
+//! - `RwLock` allows many concurrent readers (load-heavy workloads) while
+//!   still serializing writers. In tests and single-agent runtime the
+//!   contention is tiny, but `RwLock` models the real usage better than
+//!   `Mutex` and stays `Send + Sync` when `S: Send + Sync` (which `State`
+//!   guarantees).
+//! - `Arc` gives shared ownership: cloning the checkpointer clones the Arc,
+//!   not the state. Two runner instances sharing a checkpointer see the same
+//!   latest checkpoint — useful for replay tests and for swapping runners
+//!   without losing state. This mirrors real persistence where the store is
+//!   external.
+//!
+//! Future extension: keyed persistence `save_for(key, state)` for multi-tenant
+//! agents. For now single-slot keeps Wave 2 minimal and deterministic.
+
+use std::sync::{Arc, RwLock};
 
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -37,6 +52,112 @@ where
     ///
     /// `Ok(None)` means no checkpoint yet. Errors map to `PersistenceFailed`.
     fn load(&self) -> Result<Option<S>, FormeError>;
+}
+
+// ── InMemoryCheckpointer ────────────────────────────────────────────────
+
+/// In-memory single-slot checkpointer.
+///
+/// Storage: `Arc<RwLock<Option<S>>>`. `Clone` clones the Arc (shared storage),
+/// so `let b = a.clone()` sees the same latest state — intentional, mimics
+/// external stores.
+///
+/// Thread-safe, `Send + Sync` when `S: Send + Sync` (which `State` ensures).
+/// No I/O, no serialization side-effects in this impl; errors only arise from
+/// poisoned locks, mapped to `FormeError::PersistenceFailed`.
+///
+/// Generic reuse: product states (`Idle`, `Teaching`, `MyState`) all satisfy
+/// `State` via blanket impl. One `InMemoryCheckpointer<S>` works for any `S`,
+/// no per-product branching needed.
+///
+/// Example:
+/// ```
+/// use forme::persistence::{Checkpointer, InMemoryCheckpointer};
+/// use serde::{Deserialize, Serialize};
+/// use std::fmt;
+///
+/// #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// enum S { Idle, Done }
+/// impl fmt::Display for S { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{:?}", self) } }
+///
+/// let cp = InMemoryCheckpointer::<S>::new();
+/// assert!(cp.load().unwrap().is_none());
+/// cp.save(&S::Idle).unwrap();
+/// assert_eq!(cp.load().unwrap(), Some(S::Idle));
+/// ```
+#[derive(Debug)]
+pub struct InMemoryCheckpointer<S>
+where
+    S: State,
+{
+    inner: Arc<RwLock<Option<S>>>,
+}
+
+impl<S> InMemoryCheckpointer<S>
+where
+    S: State,
+{
+    /// Empty checkpoint (`load` → `None`).
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Pre-seeded checkpoint (`load` → `Some(state)`).
+    pub fn with_state(state: S) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(state))),
+        }
+    }
+
+    /// Raw inner for advanced tests (not part of public contract).
+    #[cfg(test)]
+    pub(crate) fn inner_ptr(&self) -> *const RwLock<Option<S>> {
+        Arc::as_ptr(&self.inner) as *const _
+    }
+}
+
+impl<S> Default for InMemoryCheckpointer<S>
+where
+    S: State,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> Clone for InMemoryCheckpointer<S>
+where
+    S: State,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<S> Checkpointer<S> for InMemoryCheckpointer<S>
+where
+    S: State + Serialize + DeserializeOwned + Clone,
+{
+    fn save(&self, state: &S) -> Result<(), FormeError> {
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|e| FormeError::PersistenceFailed(format!("RwLock poisoned on write: {e}")))?;
+        *guard = Some(state.clone());
+        Ok(())
+    }
+
+    fn load(&self) -> Result<Option<S>, FormeError> {
+        let guard = self
+            .inner
+            .read()
+            .map_err(|e| FormeError::PersistenceFailed(format!("RwLock poisoned on read: {e}")))?;
+        Ok(guard.clone())
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -218,5 +339,87 @@ mod tests {
         cp.save(&de).expect("save after serde roundtrip");
         let loaded: Option<TestState> = cp.load().expect("load");
         assert_eq!(loaded, Some(TestState::Active("serde".into())));
+    }
+
+    // ── InMemoryCheckpointer (Wave 2) tests ───────────────────────────
+
+    #[test]
+    fn in_memory_roundtrip() {
+        let cp = InMemoryCheckpointer::<TestState>::new();
+        assert!(cp.load().unwrap().is_none());
+        cp.save(&TestState::Idle).unwrap();
+        assert_eq!(cp.load().unwrap(), Some(TestState::Idle));
+
+        cp.save(&TestState::Active("a".into())).unwrap();
+        assert_eq!(cp.load().unwrap(), Some(TestState::Active("a".into())));
+    }
+
+    #[test]
+    fn in_memory_empty_none() {
+        let cp = InMemoryCheckpointer::<TestState>::default();
+        let loaded = cp.load().expect("load empty");
+        assert!(loaded.is_none());
+
+        // with_state seeds
+        let seeded = InMemoryCheckpointer::with_state(TestState::Idle);
+        assert_eq!(seeded.load().unwrap(), Some(TestState::Idle));
+    }
+
+    #[test]
+    fn in_memory_overwrite() {
+        let cp = InMemoryCheckpointer::<TestState>::new();
+        cp.save(&TestState::Idle).unwrap();
+        assert_eq!(cp.load().unwrap(), Some(TestState::Idle));
+
+        cp.save(&TestState::Active("second".into())).unwrap();
+        let v2 = cp.load().unwrap();
+        assert_eq!(v2, Some(TestState::Active("second".into())));
+    }
+
+    #[test]
+    fn in_memory_clone_shares_storage() {
+        let cp = InMemoryCheckpointer::<TestState>::new();
+        cp.save(&TestState::Idle).unwrap();
+
+        let cp2 = cp.clone();
+        // cp2 sees same storage
+        assert_eq!(cp2.load().unwrap(), Some(TestState::Idle));
+
+        // write via cp2 seen by cp
+        cp2.save(&TestState::Active("via clone".into())).unwrap();
+        assert_eq!(
+            cp.load().unwrap(),
+            Some(TestState::Active("via clone".into()))
+        );
+
+        // pointer equality check (Arc shared)
+        assert_eq!(cp.inner_ptr(), cp2.inner_ptr());
+    }
+
+    #[test]
+    fn in_memory_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<InMemoryCheckpointer<TestState>>();
+        // as Checkpointer trait object
+        fn assert_cp<S: State + Serialize + DeserializeOwned, C: Checkpointer<S> + Send + Sync>() {}
+        assert_cp::<TestState, InMemoryCheckpointer<TestState>>();
+
+        // threading exercise
+        let cp = InMemoryCheckpointer::<TestState>::new();
+        cp.save(&TestState::Idle).unwrap();
+        let cp_clone = cp.clone();
+        let handle = std::thread::spawn(move || cp_clone.load().unwrap());
+        let loaded = handle.join().unwrap();
+        assert_eq!(loaded, Some(TestState::Idle));
+    }
+
+    #[test]
+    fn in_memory_debug_and_default() {
+        let cp = InMemoryCheckpointer::<TestState>::default();
+        let dbg = format!("{:?}", cp);
+        assert!(dbg.contains("InMemoryCheckpointer"));
+
+        let cp2 = InMemoryCheckpointer::<TestState>::new();
+        assert!(cp2.load().unwrap().is_none());
     }
 }
