@@ -22,6 +22,8 @@ cargo fmt --check && cargo clippy -- -D warnings
 ```toml
 [dependencies]
 forme = { path = "../forme" }  # or 0.1.0 from crates.io once published
+# optional integrations
+# forme = { version = "0.1", features = ["rig", "graph-flow"] }
 ```
 
 ```rust
@@ -32,6 +34,24 @@ use forme::policy::AllowAllPolicy;
 use forme::rig_adapter::MockLlm;
 use std::{collections::HashMap, sync::Arc};
 ```
+
+#### Features
+
+* `rig` — real Rig integration (optional, no breaking change to `MockLlm`)
+  - `RigModelAdapter<M>` wraps any `rig-core` `CompletionModel`, `prompt` = preamble/system, `context` = user
+  - `ClosureAdapter` wraps any async closure `Fn(prompt,ctx)->String` — bridge for `rig::Agent`
+  - `RigAgentAdapter<A>` wraps `rig_agent::Agent` via `Prompt` trait
+  - `RigAgentFactory<C,M>` recreates `client.agent(model).preamble(&prompt).build()` per step → `into_adapter()`
+  - enable with `--features rig` (needs `rig-core = 0.41`, `rig = 0.41`, `rig-agent = 0.41`)
+* `graph-flow` — typed `forme` → `graph-flow` bridge (optional)
+  - `FormeGraphBuilder<S>` wraps `graph_flow::GraphBuilder`, keeps `S: State` typed
+  - `From<NextAction<S>> for graph_flow::NextAction` maps `Next/Continue→Continue`, `Branch/Transition→GoTo`, `Halt→End`
+  - `FormeTask<S,E,R,B,P,L>` `Task` impl running `Runner::prepare` (deterministic) and storing prompt/context/tools into `graph_flow::Context`
+  - `FormeLlmTask` variant doing full `step` incl LLM
+  - `forme_next_to_gf(action, eager)` helper for `ContinueAndExecute` opt
+  - enable with `--features graph-flow` (`graph-flow = 0.6`)
+
+Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 80, `--features rig,graph-flow` 85.
 
 ### Generic design
 
@@ -50,6 +70,7 @@ use std::{collections::HashMap, sync::Arc};
 - Wave 2: rig_adapter MockLlm, FileSnippetBuilder, ParagraphBuilder, InMemoryCheckpointer (30+ tests)
 - Wave 3: runtime Runner::prepare/step/handle_edge, ToolPlan (12 tests)
 - Wave 4: examples (`hello_world`, `support_bot`) + `qa_runner` + fixtures/snapshots (80+ total lib tests)
+- Wave 5: rig real adapters (`RigModelAdapter`, `ClosureAdapter`, `RigAgentAdapter`, `RigAgentFactory`) + graph-flow (`FormeGraphBuilder`, `FormeTask`, `FormeLlmTask`, `NextAction` conversion) — feature-gated, MockLlm non-breaking, 85 tests with `rig,graph-flow`
 
 Each wave must pass `cargo test` before next.
 
