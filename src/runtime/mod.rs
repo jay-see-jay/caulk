@@ -29,7 +29,7 @@
 //!   normalized to `FormeError::LlmFailed`.
 //! * Minimal `graph-flow` coupling — we define our own `NextAction<S>`
 //!   (`Next`, `Branch(state)`). Real `graph-flow` types can be feature-gated later.
-//! * No teacher / wayfinder types leak into public API.
+//! * No teacher / planner types leak into public API.
 
 use std::fmt;
 use std::sync::Arc;

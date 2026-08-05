@@ -4,7 +4,7 @@
 //! Destination: typed prompt registry (State × Event → Prompt), pluggable
 //! context builder trait, generic policy trait (allowed tools per State).
 //!
-//! No teaching logic. No wayfinder types in public API.
+//! No teaching logic. No planner types in public API.
 
 pub mod context_builder;
 pub mod core;
