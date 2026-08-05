@@ -73,9 +73,9 @@ impl Display for MyState { ... } // now S: State automatically
 
 S (15-30 min) — 1 trait pair + 2 concrete types + 1 error enum + 14 tests.
 
-## No Teaching / No Wayfinder
+## No Teaching / No Planner Leak
 
-`forme-teacher` subcrate explicitly out of scope per user feedback. Wayfinder types (`Destination`, `Notes`, `Decisions`) are product planning only, not shipped. Public API generic only.
+`forme-teacher` subcrate explicitly out of scope per user feedback. Planner types (`Destination`, `Notes`, `Decisions`) are product planning only, not shipped. Public API generic only.
 
 ## Usage With New Toolchain
 

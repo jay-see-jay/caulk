@@ -1,8 +1,27 @@
-hello-world snapshot
-state=Idle event=UserMsg
-prompt: You are in Idle state, greeting user. You are helpful.
-context:
-llm: Hello, world! This is forme.
-tool_plan: []
+--- forme hello_world ---
+State: Idle
+Event: UserMsg
+PromptKey via key_for: Idle::UserMsg
+Canonical: Idle::UserMsg
+Registry: InMemoryRegistry with 2 entries (Idle::UserMsg, Done::UserMsg)
 
-This file is initial placeholder — real content will be overwritten by coordination step after hello_world example finalized.
+[prepare]
+prompt: You are a helpful assistant in Idle state. Greet the user warmly.
+context: ""
+context len: 0
+(context is empty because NoopBuilder returns empty string)
+tool_plan.allowed len: 0
+tool_plan.allowed: []
+(AllowAllPolicy returns empty slice meaning all tools allowed)
+key used: Idle::UserMsg
+
+[step]
+llm_response: Hello from forme! This is canned reply.
+next_state: Idle
+prompt_key: Idle::UserMsg
+prompt: You are a helpful assistant in Idle state. Greet the user warmly.
+context: ""
+tool_plan.allowed: []
+
+Done. Key for Done + UserMsg is: Done::UserMsg
+All done. This example used MockLlm (no network).
