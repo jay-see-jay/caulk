@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn noop_returns_empty_no_history() {
-        let builder: NoopBuilder = NoopBuilder::default();
+        let builder: NoopBuilder = NoopBuilder;
         let event: SimpleEvent = SimpleEvent("ev".into());
         let history: Vec<SimpleEvent> = Vec::new();
         let ctx: String = builder.build(&event, &history).unwrap();
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn snapshot_test_deterministic() {
-        let builder: ConcatBuilder = ConcatBuilder::default();
+        let builder: ConcatBuilder = ConcatBuilder;
         let history: Vec<SimpleEvent> =
             vec![SimpleEvent("first".into()), SimpleEvent("second".into())];
         let event: SimpleEvent = SimpleEvent("current".into());

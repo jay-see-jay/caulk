@@ -253,12 +253,12 @@ mod tests {
         assert_adapter::<String, MockLlm>();
 
         // Boxed should still be Send+Sync (because trait is Send+Sync and MockLlm is)
-        fn assert_box_send_sync<E: crate::core::Event>() {
+        fn assert_box_send_sync() {
             assert_send_sync::<MockLlm>();
             // The trait bound itself is Send+Sync, but async trait not object-safe,
             // so we only check concrete type.
         }
-        assert_box_send_sync::<Ev>();
+        assert_box_send_sync();
     }
 
     #[test]

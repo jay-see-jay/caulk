@@ -401,7 +401,7 @@ mod tests {
     // 10. AllowAllPolicy default check vs is_allowed consistency
     #[test]
     fn allow_all_consistency() {
-        let p = AllowAllPolicy::default();
+        let p = AllowAllPolicy;
         let st = TestState("Teaching".into());
         for name in ["a", "b", "c", "write_code", "tool_123"] {
             let t = tool(name);

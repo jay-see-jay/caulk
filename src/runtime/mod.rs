@@ -294,10 +294,10 @@ mod tests {
     use crate::context_builder::NoopBuilder;
     use crate::core::{FormeError, PromptKey, ToolId};
     use crate::policy::{AllowAllPolicy, AllowListPolicy, DenyListPolicy, Policy as PolicyTrait};
-    use crate::prompt_registry::{InMemoryRegistry, Registry as RegistryTrait};
+    use crate::prompt_registry::InMemoryRegistry;
     use crate::rig_adapter::{LlmAdapter as LlmAdapterTrait, MockLlm};
     use serde::{Deserialize, Serialize};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::fmt;
     use std::fs;
     use std::path::PathBuf;
@@ -368,7 +368,7 @@ mod tests {
         resp: &str,
     ) -> Runner<TestState, TestEvent, InMemoryRegistry, NoopBuilder, AllowAllPolicy, MockLlm> {
         let registry = Arc::new(make_registry());
-        let builder = Arc::new(NoopBuilder::default());
+        let builder = Arc::new(NoopBuilder);
         let policy = Arc::new(AllowAllPolicy);
         let llm = MockLlm::with_response(resp);
         Runner::<TestState, TestEvent, _, _, _, _>::new(registry, builder, policy, llm)
