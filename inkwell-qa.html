@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Inkwell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{color-scheme:light;--bg:#fdfaf6;--bg2:#fffaf3;--text:#2b2a33;--dim:#9e9aa8;--border:#ece8e3;--iris:#7a5d92;--surface:#ffffff;--muted:#f6f1ea;--accent-fg:#ffffff;--writing-font:'Lora', Georgia, serif;--ui-font:'Inter', system-ui, sans-serif;--mono:'JetBrains Mono', monospace}
+*{box-sizing:border-box} html,body{margin:0;padding:0;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;min-height:100vh}
+body{font-family:var(--ui-font)}
+#topbar{position:fixed;top:0;left:0;right:0;display:flex;justify-content:center;align-items:center;height:44px;background:transparent;pointer-events:none;z-index:10}
+#topbar .inner{color:var(--dim);font-family:var(--ui-font);font-size:13px;letter-spacing:.02em;opacity:.7;transition:opacity .2s}
+#page{width:100%;min-height:100vh;display:flex;flex-direction:column}
+#editor{width:100%;flex:1;min-height:100vh;padding:72px 7vw 24vh;font-family:var(--writing-font);font-size:21px;line-height:1.8;letter-spacing:-.01em;color:var(--text);background:transparent;caret-color:var(--iris);outline:none;white-space:pre-wrap;word-wrap:break-word;word-break:break-word}
+#editor:focus{outline:none}
+#editor:empty:before{content:'';display:block}
+.fallback{width:100%;min-height:70vh;border:none;outline:none;resize:none;background:transparent;font-family:var(--writing-font);font-size:21px;line-height:1.8;color:var(--text);padding:0;caret-color:var(--iris);white-space:pre-wrap;word-wrap:break-word}
+.fallback::placeholder{color:transparent}
+#statusbar{position:fixed;bottom:20px;left:28px;font-family:var(--mono);font-size:12px;color:var(--dim);background:rgba(253,250,246,.92);backdrop-filter:blur(6px);padding:4px 10px;border-radius:9999px;border:1px solid var(--border);pointer-events:none;filter:blur(.3px)}
+#coach-panel{position:fixed;bottom:20px;right:28px;max-width:360px;z-index:20;font-family:var(--ui-font)}
+#save-state{filter:blur(.2px)}
+@media(max-width:700px){#editor{padding:28px 6vw 30vh}}
+</style>
+</head>
+<body>
+<div id="page">
+<div id="topbar"><div class="inner" id="save-state">Offline</div></div>
+<div id="editor" contenteditable="plaintext-only" spellcheck="true" autocorrect="off" autocapitalize="off" role="textbox" aria-multiline="true" aria-label="Essay"></div>
+<textarea id="fallback-editor" class="fallback" aria-label="Essay" style="display:none"></textarea>
+<div id="statusbar"><span id="word-count">0 words</span></div>
+<div id="coach-panel" style="display:none;"></div>
+<div id="debug-panel" style="position:fixed;top:10px;right:28px;font-family:var(--mono);font-size:11px;color:var(--dim);background:rgba(255,255,255,.9);padding:4px 8px;border-radius:6px;border:1px solid var(--border);">Ops:<span id="ops-len">0</span> PT:<span id="pt-only">?</span> WC:<span id="wc-debug">0</span></div>
+</div>
+<script>
+
+// ---- plain_text_offset.js inlined ----
+/**
+ * plain_text_offset.js — offset <-> DOM Range bijection + Intl.Segmenter advisory
+ * Vanilla JS, no build, plaintext-only aware
+ * Mitigations: getTargetRanges canonical, TreeWalker O(k) caching, Firefox <div> soup normalization
+ */
+
+// ---- Range <-> offset via Range.toString counting (accurate for plaintext-only) ----
+
+function rootRange(root) {
+  const r = document.createRange();
+  r.selectNodeContents(root);
+  return r;
+}
+
+/**
+ * Convert a DOM node + offset (as from StaticRange) to global essay offset.
+ * Handles Text node offset and Element child-index offset.
+ */
+function getOffsetFromNode(root, node, nodeOffset) {
+  if (!root || !node) return 0;
+  // If node is element, nodeOffset is child index — convert to text length before that child
+  let targetNode = node;
+  let targetOffset = nodeOffset;
+
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    // If element has no children, offset is 0
+    // If offset points past last child, count all text inside element
+    const children = Array.from(node.childNodes);
+    if (children.length === 0 || nodeOffset === 0) {
+      // treat as start of this element — walk up
+      // fall through to range-based method below using Range
+    } else {
+      // Build range from root start covering children before offset
+      const r = document.createRange();
+      r.selectNodeContents(root);
+      if (nodeOffset < children.length) {
+        r.setEnd(children[nodeOffset], 0);
+      } else {
+        // end is just after this element's last child — use end of node
+        r.setEndAfter(children[children.length - 1]);
+      }
+      return r.toString().length;
+    }
+  }
+
+  // Text node path — fastest is Range.toString().length up to node+offset
+  try {
+    const r = document.createRange();
+    r.selectNodeContents(root);
+    r.setEnd(targetNode, targetOffset);
+    return r.toString().length;
+  } catch (_) {
+    // Fallback TreeWalker counting
+    return fallbackOffsetFromNode(root, targetNode, targetOffset);
+  }
+}
+
+function fallbackOffsetFromNode(root, targetNode, targetOffset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  let total = 0;
+  let n;
+  while ((n = walker.nextNode())) {
+    if (n === targetNode) return total + Math.min(targetOffset, n.textContent.length);
+    total += n.textContent.length;
+  }
+  return total;
+}
+
+/**
+ * Convert a StaticRange (from beforeinput getTargetRanges) to global {from,to}
+ */
+function getOffsetsFromStaticRange(root, staticRange) {
+  if (!staticRange) return null;
+  try {
+    const from = getOffsetFromNode(root, staticRange.startContainer, staticRange.startOffset);
+    const to = getOffsetFromNode(root, staticRange.endContainer, staticRange.endOffset);
+    // Ensure from <= to
+    return from <= to ? { from, to } : { from: to, to: from };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Selection -> {anchor, focus} offsets within root, direction aware
+ */
+function getSelectionOffsets(root) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return { anchor: 0, focus: 0, collapsed: true };
+  const range0 = sel.getRangeAt(0);
+  // Check if selection is inside root
+  if (!root.contains(range0.commonAncestorContainer) && range0.commonAncestorContainer !== root) {
+    return { anchor: 0, focus: 0, collapsed: true };
+  }
+  const anchorNode = sel.anchorNode;
+  const anchorOffset = sel.anchorOffset;
+  const focusNode = sel.focusNode;
+  const focusOffset = sel.focusOffset;
+  const anchor = anchorNode ? getOffsetFromNode(root, anchorNode, anchorOffset) : 0;
+  const focus = focusNode ? getOffsetFromNode(root, focusNode, focusOffset) : anchor;
+  return { anchor, focus, collapsed: sel.isCollapsed };
+}
+
+/**
+ * Convenience: {from,to} where from <= to
+ */
+function getSelectionOffset(root) {
+  const { anchor, focus, collapsed } = getSelectionOffsets(root);
+  if (collapsed) return { from: anchor, to: anchor, collapsed: true };
+  return { from: Math.min(anchor, focus), to: Math.max(anchor, focus), collapsed: false, anchor, focus };
+}
+
+/**
+ * Set selection to a single offset (collapsed) or range {anchor,focus}
+ */
+function setSelectionOffset(root, offsetOrAnchor, focusOffset) {
+  let anchor = offsetOrAnchor;
+  let focus = focusOffset !== undefined ? focusOffset : offsetOrAnchor;
+  if (typeof offsetOrAnchor === 'object' && offsetOrAnchor !== null) {
+    anchor = offsetOrAnchor.anchor ?? offsetOrAnchor.from ?? 0;
+    focus = offsetOrAnchor.focus ?? offsetOrAnchor.to ?? anchor;
+  }
+
+  const sel = window.getSelection();
+  if (!sel) return;
+
+  const anchorPos = offsetToNode(root, anchor);
+  const focusPos = offsetToNode(root, focus);
+
+  if (!anchorPos || !focusPos) return;
+
+  try {
+    if (anchor === focus) {
+      const r = document.createRange();
+      r.setStart(anchorPos.node, anchorPos.offset);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } else {
+      // Use two ranges? Simpler: set base and extent
+      sel.setBaseAndExtent(anchorPos.node, anchorPos.offset, focusPos.node, focusPos.offset);
+    }
+  } catch (_) {
+    // Safari fallback: collapse to anchor
+    try {
+      const r = document.createRange();
+      r.setStart(anchorPos.node, anchorPos.offset);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch (_) {}
+  }
+}
+
+function offsetToNode(root, globalOffset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  let total = 0;
+  let n;
+  while ((n = walker.nextNode())) {
+    const len = n.textContent.length;
+    if (globalOffset <= total + len) {
+      return { node: n, offset: globalOffset - total };
+    }
+    total += len;
+  }
+  // Past end — return last text node at end, or root itself
+  if (total === 0) {
+    // Empty editor — no text nodes yet, return root with 0
+    // Ensure root has a text node for editing
+    if (!root.firstChild) {
+      const tn = document.createTextNode('');
+      root.appendChild(tn);
+      return { node: tn, offset: 0 };
+    }
+    return { node: root, offset: 0 };
+  }
+  // clamp to end
+  const last = (() => {
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    let lastNode = null; let cur;
+    while ((cur = w.nextNode())) lastNode = cur;
+    return lastNode;
+  })();
+  if (last) return { node: last, offset: last.textContent.length };
+  return null;
+}
+
+// ---- Intl.Segmenter advisory (same ICU as browser) ----
+
+let segWord = null;
+let segGrapheme = null;
+
+function getWordSegmenter() {
+  if (segWord) return segWord;
+  try {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      segWord = new Intl.Segmenter(undefined, { granularity: 'word' });
+      return segWord;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function getGraphemeSegmenter() {
+  if (segGrapheme) return segGrapheme;
+  try {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      segGrapheme = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      return segGrapheme;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function countWordsIntl(text) {
+  const seg = getWordSegmenter();
+  if (seg) {
+    let c = 0;
+    for (const s of seg.segment(text)) {
+      if (s.isWordLike) c++;
+    }
+    return c;
+  }
+  // fallback regex
+  if (!text || text.trim() === '') return 0;
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function wordBoundaries(text) {
+  const seg = getWordSegmenter();
+  if (!seg) return null;
+  const out = [];
+  for (const s of seg.segment(text)) out.push({ from: s.index, to: s.index + s.segment.length, word: s.segment, isWordLike: s.isWordLike });
+  return out;
+}
+
+function isProbablyWordDelete(prev, from, to) {
+  const seg = getWordSegmenter();
+  if (!seg) return { ok: true, confidence: 0.5 }; // can't verify
+  // crude: chunk contains no newline and length <= 30
+  const deleted = prev.slice(from, to);
+  if (deleted.includes('\n')) return { ok: false, confidence: 0.9 };
+  if (deleted.length > 40) return { ok: false, confidence: 0.7 };
+  return { ok: true, confidence: 0.7 };
+}
+
+// ---- plainTextUpTo helper for caret ----
+
+function plainTextUpTo(root, node, offsetInNode) {
+  return getOffsetFromNode(root, node, offsetInNode);
+}
+
+
+// ---- op_emitter.js inlined ----
+/**
+ * op_emitter.js — hybrid v1
+ * Intent logger (beforeinput) + composition gate + diff applier
+ * Mitigations applied from adversarial-review-vanilla.md + full.md:
+ * - getTargetRanges canonical (FATAL-1)
+ * - compositionstart/end single flush (FATAL-2)
+ * - dataTransfer||data for Safari iOS (FATAL-3)
+ * - intent vs op advisory, never ground truth (FATAL-4)
+ * - size guards 100k warn / 500k reject (MEDIUM-3)
+ */
+
+
+
+function createOpEmitter(editorEl, opts = {}) {
+  const onOp = opts.onOp || (() => {});
+  const maxLenWarn = opts.maxLenWarn || 100_000;
+  const maxLenHard = opts.maxLenHard || 500_000;
+
+  let prevText = editorEl.textContent || '';
+  let isComposing = false;
+  let compositionSnapshot = '';
+  let pendingIntent = null;
+  let opQueue = [];
+
+  // expose for debugging / tests
+  if (typeof window !== 'undefined') {
+    window.INKWELL_OPS = window.INKWELL_OPS || [];
+  }
+
+  function pushOp(op) {
+    opQueue.push(op);
+    if (typeof window !== 'undefined') {
+      window.INKWELL_OPS.push(op);
+      window.INKWELL_OPS = window.INKWELL_OPS.slice(-500); // keep last 500
+    }
+    try { onOp(op); } catch (e) { console.warn('[inkwell op] onOp throw', e); }
+  }
+
+  function computeDiff(prev, curr) {
+    let a = 0;
+    const pLen = prev.length;
+    const cLen = curr.length;
+    const minLen = pLen < cLen ? pLen : cLen;
+    while (a < minLen && prev.charCodeAt(a) === curr.charCodeAt(a)) a++;
+    // early exit identical (already checked)
+    let b = 0;
+    while (b < pLen - a && b < cLen - a && prev.charCodeAt(pLen - 1 - b) === curr.charCodeAt(cLen - 1 - b)) b++;
+    const from = a;
+    const to = pLen - b;
+    const insert = curr.slice(a, cLen - b);
+    return { from, to, insert };
+  }
+
+  function handleDiffFromInput() {
+    const curr = editorEl.textContent || '';
+    // Large paste guard
+    if (curr.length > maxLenHard) {
+      console.warn(`[inkwell] essay too large ${curr.length} > ${maxLenHard}, rejecting input chunk`);
+      // Roll back to prev (best effort) and restore caret at end
+      try {
+        editorEl.textContent = prevText;
+        // move caret to end
+        const sel = window.getSelection();
+        const r = document.createRange();
+        r.selectNodeContents(editorEl);
+        r.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      } catch (_) {}
+      return;
+    }
+    if (curr.length > maxLenWarn) {
+      console.warn(`[inkwell] large paste ${curr.length} > ${maxLenWarn} soft warn`);
+    }
+
+    if (curr === prevText) {
+      pendingIntent = null;
+      return;
+    }
+
+    const diffed = computeDiff(prevText, curr);
+
+    if (pendingIntent && pendingIntent.rawRange) {
+      const raw = pendingIntent.rawRange;
+      // trust rawRange from getTargetRanges as canonical (adversarial FATAL-1)
+      const from = raw.from;
+      const to = raw.to;
+      const insertedLen = curr.length - prevText.length + (to - from);
+      // clamp insertedLen to valid
+      const safeInsertedLen = Math.max(0, Math.min(insertedLen, curr.length - from));
+      const insert = curr.slice(from, from + safeInsertedLen);
+
+      // validator: compare with diff — if diff range wildly different, log divergence but still use raw
+      const divergence = Math.abs(diffed.from - from) + Math.abs(diffed.to - to);
+      if (divergence > 50) {
+        // FATAL-1 spellcheck non-local case, we already prefer raw, just telemetry
+        console.debug('[inkwell] op divergence raw vs diff', { raw: { from, to }, diff: diffed, divergence, inputType: pendingIntent.inputType });
+      }
+
+      const op = {
+        from,
+        to,
+        insert,
+        input_type: pendingIntent.inputType || 'unknown',
+        ts: pendingIntent.ts || Date.now(),
+        confidence: 1.0,
+        collapsed: !!pendingIntent.collapsed,
+        rawRange: { from, to },
+        // advisory divergence metric for future training
+        diffValidator: diffed,
+      };
+      pushOp(op);
+    } else {
+      const op = {
+        from: diffed.from,
+        to: diffed.to,
+        insert: diffed.insert,
+        input_type: (pendingIntent && pendingIntent.inputType) || 'unknown',
+        ts: (pendingIntent && pendingIntent.ts) || Date.now(),
+        confidence: pendingIntent ? 0.8 : 0.6,
+        collapsed: pendingIntent ? !!pendingIntent.collapsed : true,
+        rawRange: null,
+      };
+      pushOp(op);
+    }
+
+    prevText = curr;
+    pendingIntent = null;
+  }
+
+  // ---- beforeinput intent logger ----
+
+  function onBeforeInput(e) {
+    // Composition handling — if we're composing, pending intents are noise (FATAL-2)
+    if (isComposing && e.inputType !== 'insertCompositionText') {
+      // allow composition to flow, but don't log as separate op intent except we keep snapshot
+      // continue to capture raw range for final flush? No, suppress.
+    }
+
+    // Safari iOS: data is null but dataTransfer contains text/plain (W3C L195-196)
+    let dataText = '';
+    try {
+      if (e.dataTransfer && typeof e.dataTransfer.getData === 'function') {
+        dataText = e.dataTransfer.getData('text/plain') || '';
+      }
+    } catch (_) {}
+    // For insert variants fallback to data, then to dataText above
+    dataText = dataText || e.data || '';
+
+    let rawRange = null;
+    try {
+      if (typeof e.getTargetRanges === 'function') {
+        const ranges = e.getTargetRanges();
+        if (ranges && ranges.length > 0) {
+          const sr = ranges[0];
+          const offs = getOffsetsFromStaticRange(editorEl, sr);
+          if (offs) rawRange = offs;
+        }
+      }
+    } catch (_) {
+      rawRange = null;
+    }
+
+    pendingIntent = {
+      inputType: e.inputType || 'unknown',
+      data: dataText,
+      rawRange,
+      ts: Date.now(),
+      collapsed: window.getSelection ? !!(window.getSelection() && window.getSelection().isCollapsed) : true,
+    };
+
+    // Do NOT preventDefault() in hybrid v1 — let browser own mutation (mitigates FATAL-2 IME non-cancelable)
+  }
+
+  function onCompositionStart() {
+    isComposing = true;
+    compositionSnapshot = editorEl.textContent || '';
+    // don't flush pending
+  }
+
+  function onCompositionEnd() {
+    isComposing = false;
+    // Single flush for IME — compositionend fires before final input, but some browsers fire input after.
+    // Use microtask to let final DOM settle.
+    setTimeout(() => {
+      // diff from compositionSnapshot to final
+      // prevText is still old snapshot if we suppressed inputs during composing
+      // If we had suppressed, prevText == compositionSnapshot, so handle diff
+      handleDiffFromInput();
+      // update snapshot
+      compositionSnapshot = '';
+    }, 0);
+  }
+
+  function onInput() {
+    if (isComposing) return; // suppressed (FATAL-2)
+    handleDiffFromInput();
+  }
+
+  editorEl.addEventListener('beforeinput', onBeforeInput);
+  editorEl.addEventListener('compositionstart', onCompositionStart);
+  editorEl.addEventListener('compositionend', onCompositionEnd);
+  editorEl.addEventListener('input', onInput);
+
+  // Public API
+  return {
+    getQueue: () => [...opQueue],
+    flush: () => {
+      const out = [...opQueue];
+      opQueue = [];
+      return out;
+    },
+    destroy: () => {
+      editorEl.removeEventListener('beforeinput', onBeforeInput);
+      editorEl.removeEventListener('compositionstart', onCompositionStart);
+      editorEl.removeEventListener('compositionend', onCompositionEnd);
+      editorEl.removeEventListener('input', onInput);
+    },
+    _debug: {
+      get prevText() { return prevText; },
+      get isComposing() { return isComposing; },
+      get pendingIntent() { return pendingIntent; }
+    }
+  };
+}
+
+// ---- Textarea fallback path (Firefox ≤115, old Chromium) ----
+
+function createTextareaEmitter(textareaEl, opts = {}) {
+  const onOp = opts.onOp || (() => {});
+  const maxLenWarn = opts.maxLenWarn || 100_000;
+  const maxLenHard = opts.maxLenHard || 500_000;
+
+  let prevText = textareaEl.value || '';
+  let isComposing = false;
+  let pendingType = 'unknown';
+  let pendingTs = 0;
+
+  function pushOp(op) {
+    if (typeof window !== 'undefined') {
+      window.INKWELL_OPS = window.INKWELL_OPS || [];
+      window.INKWELL_OPS.push(op);
+    }
+    try { onOp(op); } catch (_) {}
+  }
+
+  function computeDiff(prev, curr) {
+    let a = 0;
+    const min = Math.min(prev.length, curr.length);
+    while (a < min && prev.charCodeAt(a) === curr.charCodeAt(a)) a++;
+    let b = 0;
+    while (b < prev.length - a && b < curr.length - a && prev.charCodeAt(prev.length-1-b) === curr.charCodeAt(curr.length-1-b)) b++;
+    return { from: a, to: prev.length - b, insert: curr.slice(a, curr.length - b) };
+  }
+
+  function handleInput() {
+    const curr = textareaEl.value || '';
+    if (curr.length > maxLenHard) {
+      console.warn('[inkwell textarea] hard limit reject');
+      textareaEl.value = prevText;
+      return;
+    }
+    if (curr.length > maxLenWarn) console.warn('[inkwell textarea] soft warn large', curr.length);
+    if (curr === prevText) return;
+    const d = computeDiff(prevText, curr);
+    const op = { from: d.from, to: d.to, insert: d.insert, input_type: pendingType, ts: pendingTs || Date.now(), confidence: 0.6, rawRange: null };
+    pushOp(op);
+    prevText = curr;
+  }
+
+  function onBeforeInput(e) {
+    pendingType = e.inputType || 'unknown';
+    pendingTs = Date.now();
+  }
+  function onCompStart() { isComposing = true; }
+  function onCompEnd() { isComposing = false; setTimeout(handleInput, 0); }
+  function onInput() { if (isComposing) return; handleInput(); }
+
+  textareaEl.addEventListener('beforeinput', onBeforeInput);
+  textareaEl.addEventListener('compositionstart', onCompStart);
+  textareaEl.addEventListener('compositionend', onCompEnd);
+  textareaEl.addEventListener('input', onInput);
+
+  return {
+    destroy: () => {
+      textareaEl.removeEventListener('beforeinput', onBeforeInput);
+      textareaEl.removeEventListener('compositionstart', onCompStart);
+      textareaEl.removeEventListener('compositionend', onCompEnd);
+      textareaEl.removeEventListener('input', onInput);
+    }
+  };
+}
+
+
+// ---- editor.js inlined ----
+/**
+ * editor.js — vanilla JS plaintext-only mount, blank.page full-width, hybrid v1
+ * No CM6, no Vite, no npm build, <2kb core + offsets
+ * Features:
+ * - blank.page minimal: --bg:#fdfaf6, 7vw breathing, Lora 21px/1.8, cursor-only start
+ * - Offline dim top-center + 0 words blurred bottom-left
+ * - plaintext-only contenteditable with Firefox textarea fallback
+ * - intent_logger + composition_gate + diff_applier via op_emitter.js
+ * - plain_text_offset.js bijection same ICU via Intl.Segmenter advisory
+ * - exposes window.INKWELL_OPS queue, window.INKWELL_EDITOR
+ * - auto-focus caret, word count live, localStorage backup
+ */
+
+
+
+
+const LS_KEY = 'inkwell:lastDraft:v2';
+
+// ---- plaintext-only support detection ----
+
+function isPlaintextOnlySupported() {
+  const el = document.createElement('div');
+  try {
+    el.contentEditable = 'plaintext-only';
+    return el.contentEditable === 'plaintext-only';
+  } catch (_) {
+    return false;
+  }
+}
+
+function isMobileSafari() {
+  // used for extra dataTransfer handling note — logic already in op_emitter
+  return /iPad|iPhone|iPod/.test(navigator.userAgent);
+}
+
+// ---- mount ----
+
+function mount(parentOrRoot) {
+  const mountRoot = typeof parentOrRoot === 'string'
+    ? document.querySelector(parentOrRoot)
+    : parentOrRoot;
+
+  // If called with #editor div, mount inside it; if #page, find #editor inside
+  let editorEl = null;
+  let statusEl = document.getElementById('word-count');
+  let saveStateEl = document.getElementById('save-state');
+
+  if (mountRoot && mountRoot.id === 'editor') {
+    editorEl = mountRoot;
+  } else if (mountRoot) {
+    editorEl = mountRoot.querySelector('#editor') || mountRoot;
+  } else {
+    editorEl = document.getElementById('editor');
+  }
+
+  if (!editorEl) {
+    console.warn('[inkwell] no #editor found, abort mount');
+    return null;
+  }
+
+  // If editorEl is wrapper div containing textarea fallback, prefer contenteditable child or itself
+  const fallbackInDom = document.getElementById('fallback-editor');
+  
+  const supported = isPlaintextOnlySupported();
+  let usingTextarea = false;
+  let textareaEl = null;
+  let emitter = null;
+
+  // Restore backup — v2 plain text (no CM6 JSON)
+  let initialText = '';
+  try {
+    const backed = localStorage.getItem(LS_KEY);
+    if (backed) initialText = backed;
+    else if (fallbackInDom && fallbackInDom.value) initialText = fallbackInDom.value;
+  } catch (_) {}
+
+  function makeContentEditable(el) {
+    el.setAttribute('contenteditable', 'plaintext-only');
+    el.setAttribute('role', 'textbox');
+    el.setAttribute('aria-multiline', 'true');
+    el.setAttribute('aria-label', 'Essay');
+    el.setAttribute('autocapitalize', 'off');
+    el.setAttribute('autocorrect', 'off');
+    // plaintext-only already strips rich — keep spellcheck true for W3C insertReplacementText tests (adversarial)
+    el.spellcheck = true;
+    // Ensure white-space pre-wrap (CSS also) and outline none
+    el.style.whiteSpace = 'pre-wrap';
+    el.style.wordWrap = 'break-word';
+    el.style.outline = 'none';
+    if (initialText) {
+      el.textContent = initialText;
+    } else {
+      // cursor-only start — empty, no placeholder (blank.page)
+      el.textContent = '';
+    }
+  }
+
+  function wordCountUpdate() {
+    const text = usingTextarea ? (textareaEl.value || '') : (editorEl.textContent || '');
+    const wc = countWordsIntl(text);
+    if (statusEl) statusEl.textContent = `${wc} words`;
+    if (saveStateEl) {
+      saveStateEl.textContent = wc === 0 ? 'Offline' : 'Offline';
+      saveStateEl.style.opacity = wc === 0 ? '0.7' : '0.5';
+    }
+    // localStorage backup
+    try { localStorage.setItem(LS_KEY, text); } catch (_) {}
+  }
+
+  if (supported) {
+    // ---- plaintext-only path (Chrome, Safari 16.4+, Edge) ----
+    usingTextarea = false;
+    makeContentEditable(editorEl);
+
+    // Hide textarea fallback if present
+    if (fallbackInDom) fallbackInDom.style.display = 'none';
+
+    // Install hybrid emitter
+    emitter = createOpEmitter(editorEl, {
+      onOp: (op) => {
+        wordCountUpdate();
+        // For now just debug — sync queue will POST later (ticket 007)
+        console.debug('[inkwell op]', op);
+      }
+    });
+
+    // Word count wiring already via emitter, but also on selectionchange etc
+    editorEl.addEventListener('keyup', wordCountUpdate);
+    editorEl.addEventListener('paste', () => setTimeout(wordCountUpdate, 0));
+
+    // Immediate focus — just cursor blinking
+    setTimeout(() => {
+      try {
+        editorEl.focus();
+        // Place caret at end if we restored text
+        if (initialText) {
+          // collapse to end
+          const sel = window.getSelection();
+          const r = document.createRange();
+          r.selectNodeContents(editorEl);
+          r.collapse(false);
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+      } catch (_) {}
+    }, 30);
+
+    wordCountUpdate();
+    console.log('[inkwell] plaintext-only mount blank.page —', editorEl.textContent.length === 0 ? 'empty cursor ready' : editorEl.textContent.length + ' chars', isMobileSafari() ? '(iOS)' : '');
+
+  } else {
+    // ---- Firefox ≤115 / old Chromium fallback — textarea (spec Empty getTargetRanges) ----
+    usingTextarea = true;
+    // Use existing textarea if server provided, else create one
+    textareaEl = fallbackInDom;
+    if (!textareaEl) {
+      textareaEl = document.createElement('textarea');
+      textareaEl.id = 'fallback-editor';
+      textareaEl.className = 'fallback';
+      textareaEl.setAttribute('aria-label', 'Essay');
+      editorEl.innerHTML = '';
+      editorEl.appendChild(textareaEl);
+    } else {
+      textareaEl.style.display = 'block';
+      textareaEl.style.background = 'transparent';
+    }
+
+    if (initialText) textareaEl.value = initialText;
+    textareaEl.style.minHeight = '60vh';
+    textareaEl.style.width = '100%';
+    textareaEl.style.border = 'none';
+    textareaEl.style.outline = 'none';
+    textareaEl.style.resize = 'none';
+    textareaEl.style.fontFamily = "'Lora', Georgia, serif";
+    textareaEl.style.fontSize = '21px';
+    textareaEl.style.lineHeight = '1.8';
+
+    emitter = createTextareaEmitter(textareaEl, {
+      onOp: () => wordCountUpdate()
+    });
+
+    textareaEl.addEventListener('input', wordCountUpdate);
+    setTimeout(() => { try { textareaEl.focus(); } catch (_) {} }, 30);
+    wordCountUpdate();
+    console.log('[inkwell] textarea fallback mount —', textareaEl.value.length + ' chars (Firefox path)');
+  }
+
+  // Expose for debugging / downstream sync queue
+  const api = {
+    root: editorEl,
+    textarea: usingTextarea ? textareaEl : null,
+    usingTextarea,
+    isPlaintextOnly: supported,
+    getText: () => usingTextarea ? (textareaEl.value || '') : (editorEl.textContent || ''),
+    getWordCount: () => countWordsIntl(api.getText()),
+    getSelectionOffsets: () => usingTextarea ? { from: textareaEl.selectionStart, to: textareaEl.selectionEnd } : getSelectionOffset(editorEl),
+    setSelection: (anchor, focus) => {
+      if (usingTextarea) { textareaEl.selectionStart = anchor; textareaEl.selectionEnd = focus ?? anchor; }
+      else setSelectionOffset(editorEl, anchor, focus);
+    },
+    getOps: () => emitter && emitter.getQueue ? emitter.getQueue() : (window.INKWELL_OPS || []),
+    flushOps: () => emitter && emitter.flush ? emitter.flush() : [],
+    destroy: () => { if (emitter) emitter.destroy(); },
+    _emitter: emitter
+  };
+
+  if (typeof window !== 'undefined') {
+    window.INKWELL_EDITOR = api;
+    window.INKWELL_OPS = window.INKWELL_OPS || [];
+  }
+
+  return api;
+}
+
+// Auto-mount if shell already has #editor on load (module entry)
+if (typeof window !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      const el = document.getElementById('editor');
+      if (el && !el.querySelector('[data-inkwell-mounted]')) {
+        el.setAttribute('data-inkwell-mounted', '1');
+        mount(el);
+      }
+    });
+  } else {
+    const el = document.getElementById('editor');
+    if (el && !window.INKWELL_EDITOR) {
+      el.setAttribute('data-inkwell-mounted', '1');
+      mount(el);
+    }
+  }
+}
+
+
+// Expose mount as global for module-style but we call directly
+
+
+// after mount definitions, auto-mount
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('editor');
+  if (el) {
+    const api = mount(el);
+    if (api) {
+      console.log('[inkwell] mount ok', api.isPlaintextOnly ? 'plaintext-only' : 'textarea', 'bundled self-contained');
+      // update debug panel
+      const ptEl = document.getElementById('pt-only');
+      const wcEl = document.getElementById('wc-debug');
+      const opsEl = document.getElementById('ops-len');
+      if (ptEl) ptEl.textContent = api.isPlaintextOnly ? 'true' : 'false';
+      // periodic updater for ops length and word count
+      setInterval(() => {
+        try {
+          if (window.INKWELL_OPS && opsEl) opsEl.textContent = window.INKWELL_OPS.length;
+          if (api && wcEl) wcEl.textContent = api.getWordCount();
+        } catch(e){}
+      }, 300);
+    }
+  }
+});
+document.addEventListener('keydown', e => { if ((e.metaKey||e.ctrlKey)&&e.key==='s'){ e.preventDefault(); }});
+
+// expose for QA
+window.__inkwell_test = {
+  getOpsLen: () => (window.INKWELL_OPS||[]).length,
+  isPT: () => window.INKWELL_EDITOR && window.INKWELL_EDITOR.isPlaintextOnly,
+  getWC: () => document.getElementById('word-count')?.textContent
+};
+</script>
+</body>
+</html>
