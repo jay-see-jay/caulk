@@ -350,9 +350,9 @@ where
     ) -> Result<StepOutput<S>, FormeError> {
         let prepared = self.prepare(state, event, history)?;
         let score = prepared.score;
-        let llm_response = if matches!(score, Some(s) if s.verdict == Verdict::Silent)
-            || (prepared.prompt_missing && score.is_none())
-        {
+        let skip_llm = matches!(score, Some(s) if s.verdict == Verdict::Silent)
+            || (prepared.prompt_missing && score.is_none());
+        let llm_response = if skip_llm {
             String::new()
         } else {
             self.llm
