@@ -19,7 +19,7 @@ use caulk::policy::{AllowAllPolicy, AllowListPolicy, Policy};
 use caulk::prompt_registry::{InMemoryRegistry, Registry};
 use caulk::rig_adapter::MockLlm;
 use caulk::transition::{Action, Transition, TransitionTable};
-use caulk::{NextAction, Runner, SessionDriver};
+use caulk::{DispatchOutput, NextAction, Runner, SessionDriver};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -143,6 +143,221 @@ fn make_registry() -> InMemoryRegistry {
         "You are a helpful assistant in Idle state. Greet the user warmly.".to_string(),
     );
     InMemoryRegistry::new(map)
+}
+
+type QaRunner = Runner<AppState, AppEvent, InMemoryRegistry, NoopBuilder, AllowAllPolicy, MockLlm>;
+
+type QaDriver = SessionDriver<
+    AppState,
+    AppEvent,
+    InMemoryRegistry,
+    NoopBuilder,
+    AllowAllPolicy,
+    MockLlm,
+    InMemoryCheckpointer<AppState>,
+>;
+
+fn driver_table() -> TransitionTable<AppState> {
+    TransitionTable::new()
+        .with(
+            &AppState::new("Idle"),
+            &AppEvent::new("UserMsg"),
+            Transition::llm(AppState::new("Done")),
+        )
+        .with(
+            &AppState::new("Done"),
+            &AppEvent::new("UserMsg"),
+            Transition::halt(AppState::new("Done")),
+        )
+}
+
+fn checkpoint_is(shared: &InMemoryCheckpointer<AppState>, state: &AppState) -> bool {
+    matches!(shared.load(), Ok(Some(ref s)) if *s == *state)
+}
+
+fn dispatch_user_msg(
+    driver: &mut QaDriver,
+    name: &str,
+    step: u8,
+) -> Option<DispatchOutput<AppState>> {
+    match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
+        Ok(out) => Some(out),
+        Err(e) => {
+            eprintln!("FAIL {name}: step {step} dispatch error: {e}");
+            None
+        }
+    }
+}
+
+fn driver_step1(
+    driver: &mut QaDriver,
+    shared: &InMemoryCheckpointer<AppState>,
+    name: &str,
+) -> bool {
+    let Some(out) = dispatch_user_msg(driver, name, 1) else {
+        return false;
+    };
+    if out.next_state != AppState::new("Done") {
+        eprintln!("FAIL {name}: step 1 next_state {:?}", out.next_state);
+        return false;
+    }
+    if out.action != Action::Llm {
+        eprintln!("FAIL {name}: step 1 action {:?}", out.action);
+        return false;
+    }
+    if out.next_action != Some(NextAction::Transition(AppState::new("Done"))) {
+        eprintln!("FAIL {name}: step 1 next_action {:?}", out.next_action);
+        return false;
+    }
+    if out.llm_response.as_deref() != Some("Hello from caulk! This is canned reply.") {
+        eprintln!("FAIL {name}: step 1 llm_response {:?}", out.llm_response);
+        return false;
+    }
+    if out.prompt_missing {
+        eprintln!("FAIL {name}: step 1 prompt_missing should be false");
+        return false;
+    }
+    if *driver.current_state() != AppState::new("Done") {
+        eprintln!("FAIL {name}: step 1 current_state not Done");
+        return false;
+    }
+    if !checkpoint_is(shared, &AppState::new("Done")) {
+        eprintln!("FAIL {name}: step 1 checkpoint not Done");
+        return false;
+    }
+    true
+}
+
+fn driver_step2(
+    driver: &mut QaDriver,
+    shared: &InMemoryCheckpointer<AppState>,
+    name: &str,
+) -> bool {
+    let Some(out) = dispatch_user_msg(driver, name, 2) else {
+        return false;
+    };
+    if out.action != Action::Halt {
+        eprintln!("FAIL {name}: step 2 action {:?}", out.action);
+        return false;
+    }
+    if out.next_action != Some(NextAction::Halt) {
+        eprintln!("FAIL {name}: step 2 next_action {:?}", out.next_action);
+        return false;
+    }
+    if out.llm_response.is_some() {
+        eprintln!("FAIL {name}: step 2 llm_response should be None");
+        return false;
+    }
+    if out.prompt_missing {
+        eprintln!("FAIL {name}: step 2 prompt_missing should be false");
+        return false;
+    }
+    if !driver.is_halted() {
+        eprintln!("FAIL {name}: step 2 driver should be halted");
+        return false;
+    }
+    if !checkpoint_is(shared, &AppState::new("Done")) {
+        eprintln!("FAIL {name}: step 2 checkpoint not Done");
+        return false;
+    }
+    true
+}
+
+fn driver_step3(
+    registry: &Arc<InMemoryRegistry>,
+    builder: &Arc<NoopBuilder>,
+    policy: &Arc<AllowAllPolicy>,
+    shared: &InMemoryCheckpointer<AppState>,
+    name: &str,
+) -> bool {
+    let runner2: QaRunner = Runner::new(
+        Arc::clone(registry),
+        Arc::clone(builder),
+        Arc::clone(policy),
+        MockLlm::with_response("Hello from caulk! This is canned reply."),
+    );
+    match SessionDriver::resume(runner2, driver_table(), shared.clone()) {
+        Ok(resumed) => {
+            if *resumed.current_state() != AppState::new("Done") {
+                eprintln!("FAIL {name}: step 3 resumed state not Done");
+                return false;
+            }
+            if resumed.is_halted() {
+                // Halt is not persisted (§3.6): resume is fresh, non-halted.
+                eprintln!("FAIL {name}: step 3 resumed driver should not be halted");
+                return false;
+            }
+            if !resumed.history().is_empty() {
+                eprintln!("FAIL {name}: step 3 resumed history should be empty");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("FAIL {name}: step 3 resume error: {e}");
+            false
+        }
+    }
+}
+
+fn driver_step4(driver: &mut QaDriver, name: &str) -> bool {
+    match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
+        Ok(out) => {
+            eprintln!("FAIL {name}: step 4 dispatch should error, got {out:?}");
+            false
+        }
+        Err(e) => {
+            if !e.is_session_halted() {
+                eprintln!("FAIL {name}: step 4 error not SessionHalted: {e}");
+                return false;
+            }
+            if *driver.current_state() != AppState::new("Done") {
+                eprintln!("FAIL {name}: step 4 state moved from Done");
+                return false;
+            }
+            if driver.history().len() != 2 {
+                eprintln!(
+                    "FAIL {name}: step 4 history len {} != 2",
+                    driver.history().len()
+                );
+                return false;
+            }
+            true
+        }
+    }
+}
+
+/// Check 5: driver check — dispatch + halt + resume + dispatch-after-halt.
+/// Returns false on the first mismatched step, after printing a diagnostic.
+fn driver_check(
+    runner: QaRunner,
+    registry: &Arc<InMemoryRegistry>,
+    builder: &Arc<NoopBuilder>,
+    policy: &Arc<AllowAllPolicy>,
+) -> bool {
+    let name = "driver_check";
+    let checkpointer = InMemoryCheckpointer::new();
+    let shared = checkpointer.clone();
+    let mut driver =
+        SessionDriver::new(runner, driver_table(), checkpointer, AppState::new("Idle"));
+
+    // 1. Dispatch UserMsg from Idle: Llm to Done, reply, persisted.
+    if !driver_step1(&mut driver, &shared, name) {
+        return false;
+    }
+    // 2. Dispatch UserMsg from Done: Halt, no reply, halted, persisted.
+    if !driver_step2(&mut driver, &shared, name) {
+        return false;
+    }
+    // 3. Persistence round-trip: resume lands on Done, not halted, no history.
+    if !driver_step3(registry, builder, policy, &shared, name) {
+        return false;
+    }
+    // 4. Dispatch-after-halt on the original driver errors SessionHalted.
+    if !driver_step4(&mut driver, name) {
+        return false;
+    }
+    true
 }
 
 fn main() {
@@ -409,173 +624,12 @@ fn main() {
     }
 
     // ── Check 5: driver check ─────────────────────────────────────────────
-    {
-        let name = "driver_check";
-        let mut ok = true;
-        let table = TransitionTable::new()
-            .with(
-                &AppState::new("Idle"),
-                &AppEvent::new("UserMsg"),
-                Transition::llm(AppState::new("Done")),
-            )
-            .with(
-                &AppState::new("Done"),
-                &AppEvent::new("UserMsg"),
-                Transition::halt(AppState::new("Done")),
-            );
-        let checkpointer = InMemoryCheckpointer::new();
-        let shared = checkpointer.clone();
-        let mut driver = SessionDriver::new(runner, table, checkpointer, AppState::new("Idle"));
-
-        // 1. Dispatch UserMsg from Idle: Llm to Done, reply, persisted.
-        if ok {
-            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
-                Ok(out) => {
-                    if out.next_state != AppState::new("Done") {
-                        eprintln!("FAIL {name}: step 1 next_state {:?}", out.next_state);
-                        ok = false;
-                    } else if out.action != Action::Llm {
-                        eprintln!("FAIL {name}: step 1 action {:?}", out.action);
-                        ok = false;
-                    } else if out.next_action != Some(NextAction::Transition(AppState::new("Done")))
-                    {
-                        eprintln!("FAIL {name}: step 1 next_action {:?}", out.next_action);
-                        ok = false;
-                    } else if out.llm_response.as_deref()
-                        != Some("Hello from caulk! This is canned reply.")
-                    {
-                        eprintln!("FAIL {name}: step 1 llm_response {:?}", out.llm_response);
-                        ok = false;
-                    } else if out.prompt_missing {
-                        eprintln!("FAIL {name}: step 1 prompt_missing should be false");
-                        ok = false;
-                    } else if *driver.current_state() != AppState::new("Done") {
-                        eprintln!("FAIL {name}: step 1 current_state not Done");
-                        ok = false;
-                    } else if !matches!(shared.load(), Ok(Some(ref s)) if *s == AppState::new("Done"))
-                    {
-                        eprintln!("FAIL {name}: step 1 checkpoint not Done");
-                        ok = false;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("FAIL {name}: step 1 dispatch error: {e}");
-                    ok = false;
-                }
-            }
-        }
-
-        // 2. Dispatch UserMsg from Done: Halt, no reply, halted, persisted.
-        if ok {
-            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
-                Ok(out) => {
-                    if out.action != Action::Halt {
-                        eprintln!("FAIL {name}: step 2 action {:?}", out.action);
-                        ok = false;
-                    } else if out.next_action != Some(NextAction::Halt) {
-                        eprintln!("FAIL {name}: step 2 next_action {:?}", out.next_action);
-                        ok = false;
-                    } else if out.llm_response.is_some() {
-                        eprintln!("FAIL {name}: step 2 llm_response should be None");
-                        ok = false;
-                    } else if out.prompt_missing {
-                        eprintln!("FAIL {name}: step 2 prompt_missing should be false");
-                        ok = false;
-                    } else if !driver.is_halted() {
-                        eprintln!("FAIL {name}: step 2 driver should be halted");
-                        ok = false;
-                    } else if !matches!(shared.load(), Ok(Some(ref s)) if *s == AppState::new("Done"))
-                    {
-                        eprintln!("FAIL {name}: step 2 checkpoint not Done");
-                        ok = false;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("FAIL {name}: step 2 dispatch error: {e}");
-                    ok = false;
-                }
-            }
-        }
-
-        // 3. Persistence round-trip: resume lands on Done, not halted, no history.
-        if ok {
-            let runner2: Runner<
-                AppState,
-                AppEvent,
-                InMemoryRegistry,
-                NoopBuilder,
-                AllowAllPolicy,
-                MockLlm,
-            > = Runner::new(
-                Arc::clone(&registry),
-                Arc::clone(&builder),
-                Arc::clone(&policy),
-                MockLlm::with_response("Hello from caulk! This is canned reply."),
-            );
-            let table2 = TransitionTable::new()
-                .with(
-                    &AppState::new("Idle"),
-                    &AppEvent::new("UserMsg"),
-                    Transition::llm(AppState::new("Done")),
-                )
-                .with(
-                    &AppState::new("Done"),
-                    &AppEvent::new("UserMsg"),
-                    Transition::halt(AppState::new("Done")),
-                );
-            match SessionDriver::resume(runner2, table2, shared.clone()) {
-                Ok(resumed) => {
-                    if *resumed.current_state() != AppState::new("Done") {
-                        eprintln!("FAIL {name}: step 3 resumed state not Done");
-                        ok = false;
-                    } else if resumed.is_halted() {
-                        // Halt is not persisted (§3.6): resume is fresh, non-halted.
-                        eprintln!("FAIL {name}: step 3 resumed driver should not be halted");
-                        ok = false;
-                    } else if !resumed.history().is_empty() {
-                        eprintln!("FAIL {name}: step 3 resumed history should be empty");
-                        ok = false;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("FAIL {name}: step 3 resume error: {e}");
-                    ok = false;
-                }
-            }
-        }
-
-        // 4. Dispatch-after-halt on the original driver errors SessionHalted.
-        if ok {
-            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
-                Ok(out) => {
-                    eprintln!("FAIL {name}: step 4 dispatch should error, got {out:?}");
-                    ok = false;
-                }
-                Err(e) => {
-                    if !e.is_session_halted() {
-                        eprintln!("FAIL {name}: step 4 error not SessionHalted: {e}");
-                        ok = false;
-                    } else if *driver.current_state() != AppState::new("Done") {
-                        eprintln!("FAIL {name}: step 4 state moved from Done");
-                        ok = false;
-                    } else if driver.history().len() != 2 {
-                        eprintln!(
-                            "FAIL {name}: step 4 history len {} != 2",
-                            driver.history().len()
-                        );
-                        ok = false;
-                    }
-                }
-            }
-        }
-
-        if ok {
-            println!("PASS {name} (dispatch + halt + resume + dispatch-after-halt)");
-            passed += 1;
-        } else {
-            println!("FAIL {name}");
-            failed += 1;
-        }
+    if driver_check(runner, &registry, &builder, &policy) {
+        println!("PASS driver_check (dispatch + halt + resume + dispatch-after-halt)");
+        passed += 1;
+    } else {
+        println!("FAIL driver_check");
+        failed += 1;
     }
 
     // ── Overall ───────────────────────────────────────────────────────────

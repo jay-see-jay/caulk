@@ -11,7 +11,7 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 ```bash
 cargo test --lib                # 135 unit tests, core + registry + policy + runtime + scorer + transition + driver
 cargo run --example hello_world # Idle/Done FSM demo with MockLlm, no network
-cargo run --example support_bot # 3-state refund FSM, policy deny demo (now driven by `SessionDriver`)
+cargo run --example support_bot # 4-state refund FSM, policy deny demo (now driven by `SessionDriver`)
 cargo run --bin qa_runner       # replay determinism + policy deny + snapshot + driver check (5 checks)
 cargo doc --no-deps             # public API leak check
 cargo fmt --check && cargo clippy -- -D warnings
@@ -100,7 +100,7 @@ src/
   runtime/       # Runner, ToolPlan, StepOutput, NextAction
 examples/
   hello_world.rs # Idle/Done, NoopBuilder, AllowAll, MockLlm
-  support_bot.rs # 3-state refund, ParagraphBuilder, custom policy
+  support_bot.rs # 4-state refund, ParagraphBuilder, custom policy
 tests/
   fixtures/
     event-log.json

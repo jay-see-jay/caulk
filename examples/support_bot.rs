@@ -1,4 +1,4 @@
-//! support_bot — 3-state refund FSM driven by `SessionDriver`
+//! support_bot — 4-state refund FSM driven by `SessionDriver`
 //!
 //! States: Greeting -> CollectingInfo -> Resolving -> Done
 //! Events: UserAskedRefund, InfoProvided, RefundRequested
@@ -24,6 +24,16 @@ use caulk::runtime::Runner;
 use caulk::transition::{Transition, TransitionTable};
 use caulk::SessionDriver;
 use serde::{Deserialize, Serialize};
+
+type SupportDriver = SessionDriver<
+    SupportState,
+    SupportEvent,
+    InMemoryRegistry,
+    ParagraphBuilder,
+    SupportPolicy,
+    MockLlm,
+    InMemoryCheckpointer<SupportState>,
+>;
 
 // ── State ─────────────────────────────────────────────────────────────────
 
@@ -134,8 +144,9 @@ fn denied_tool_for(state: &SupportState) -> ToolId {
     }
 }
 
-fn main() {
-    // ── Registry (exactly 2 entries — the Halt row never steps) ────────────
+// ── Registry (exactly 2 entries — the Halt row never steps) ───────────────
+
+fn support_registry() -> Arc<InMemoryRegistry> {
     let mut map: HashMap<PromptKey, String> = HashMap::new();
     map.insert(
         PromptKey::new("Greeting", "UserAskedRefund"),
@@ -151,45 +162,46 @@ fn main() {
          order ID or reason. Do not refund yet. Keep tone supportive."
             .into(),
     );
-    let registry = Arc::new(InMemoryRegistry::new(map));
+    Arc::new(InMemoryRegistry::new(map))
+}
 
-    // ── Context builder (ParagraphBuilder prose, N=2) ────────────────────────
-    let builder = Arc::new(ParagraphBuilder::with_n(2));
+// ── LLM (MockLlm returns a different response per prompt) ──────────────────
 
-    // ── Policy ───────────────────────────────────────────────────────────────
-    let policy = Arc::new(SupportPolicy::new());
+fn greeting_reply(context: &str) -> String {
+    format!(
+        "Hello! I can help with refunds. I’ll look up your profile/order. \
+         [seen context: {}]",
+        context.chars().take(80).collect::<String>()
+    )
+}
 
-    // ── LLM (MockLlm closure returns different response per prompt) ─────────
-    let llm = MockLlm::with_fn(|prompt: String, context: String| {
-        let lower = prompt.to_lowercase();
-        let resp = if lower.contains("greeting") {
-            format!(
-                "Hello! I can help with refunds. I’ll look up your profile/order. \
-                 [seen context: {}]",
-                context.chars().take(80).collect::<String>()
-            )
-        } else if lower.contains("collecting") {
-            "Thanks for the info. I’ve checked your profile and order. \
-             Could you confirm the order ID and reason? (ask_clarification) \
-             [collecting_info]"
-                .to_string()
-        } else {
-            format!(
-                "Fallback response for prompt: {}",
-                prompt.chars().take(60).collect::<String>()
-            )
-        };
-        Ok(resp)
-    });
+fn collecting_reply() -> String {
+    "Thanks for the info. I’ve checked your profile and order. \
+     Could you confirm the order ID and reason? (ask_clarification) \
+     [collecting_info]"
+        .to_string()
+}
 
-    // ── Runner + table + driver ─────────────────────────────────────────────
-    let runner = Runner::new(
-        Arc::clone(&registry),
-        Arc::clone(&builder),
-        Arc::clone(&policy),
-        llm,
-    );
-    let table = TransitionTable::new()
+fn fallback_reply(prompt: &str) -> String {
+    format!(
+        "Fallback response for prompt: {}",
+        prompt.chars().take(60).collect::<String>()
+    )
+}
+
+fn reply_for_prompt(prompt: String, context: String) -> Result<String, FormeError> {
+    let lower = prompt.to_lowercase();
+    if lower.contains("greeting") {
+        Ok(greeting_reply(&context))
+    } else if lower.contains("collecting") {
+        Ok(collecting_reply())
+    } else {
+        Ok(fallback_reply(&prompt))
+    }
+}
+
+fn support_table() -> TransitionTable<SupportState> {
+    TransitionTable::new()
         .with(
             &SupportState::Greeting,
             &SupportEvent::UserAskedRefund,
@@ -204,10 +216,69 @@ fn main() {
             &SupportState::Resolving,
             &SupportEvent::RefundRequested,
             Transition::halt(SupportState::Done),
-        );
+        )
+}
+
+fn print_denied(tid: &ToolId) {
+    println!(
+        "denied tool attempt: {} -> {} (FormeError::PolicyDenied)",
+        tid,
+        FormeError::PolicyDenied(tid.clone())
+    );
+    let err = FormeError::PolicyDenied(tid.clone());
+    println!("  is_denied(): {}", err.is_denied());
+}
+
+fn policy_deny_demo(driver: &SupportDriver, state: &SupportState) {
+    let denied_attempt = denied_tool_for(state);
+    match driver.runner().policy().check(state, &denied_attempt) {
+        Ok(()) => {
+            println!(
+                "tool check: {} allowed (expected deny for demo, but allowed)",
+                denied_attempt
+            );
+        }
+        Err(FormeError::PolicyDenied(tid)) => print_denied(&tid),
+        Err(other) => {
+            println!("unexpected policy error: {other}");
+        }
+    }
+}
+
+fn run_turn(driver: &mut SupportDriver, idx: usize, event: &SupportEvent) {
+    let state = driver.current_state().clone();
+    println!("=== Turn {}: State={} Event={} ===", idx + 1, state, event);
+
+    // ---- policy deny demo ----------------------------------------------
+    policy_deny_demo(driver, &state);
+
+    // ---- dispatch through the driver ------------------------------------
+    let out = block_on(driver.dispatch(event)).expect("dispatch ok");
+    println!("next_state: {}", out.next_state);
+    println!("action: {}", out.action);
+    println!("next_action: {:?}", out.next_action);
+    println!(
+        "llm_response: {}",
+        out.llm_response.as_deref().unwrap_or("(none)")
+    );
+    println!("prompt_missing: {}", out.prompt_missing);
+    println!();
+}
+
+fn main() {
+    let registry = support_registry();
+    let builder = Arc::new(ParagraphBuilder::with_n(2));
+    let policy = Arc::new(SupportPolicy::new());
+    let llm = MockLlm::with_fn(reply_for_prompt);
+    let runner = Runner::new(
+        Arc::clone(&registry),
+        Arc::clone(&builder),
+        Arc::clone(&policy),
+        llm,
+    );
     let mut driver = SessionDriver::new(
         runner,
-        table,
+        support_table(),
         InMemoryCheckpointer::new(),
         SupportState::Greeting,
     );
@@ -220,43 +291,7 @@ fn main() {
     ];
 
     for (idx, event) in events.iter().enumerate() {
-        let state = driver.current_state().clone();
-        println!("=== Turn {}: State={} Event={} ===", idx + 1, state, event);
-
-        // ---- policy deny demo ----------------------------------------------
-        let denied_attempt = denied_tool_for(&state);
-        match driver.runner().policy().check(&state, &denied_attempt) {
-            Ok(()) => {
-                println!(
-                    "tool check: {} allowed (expected deny for demo, but allowed)",
-                    denied_attempt
-                );
-            }
-            Err(FormeError::PolicyDenied(tid)) => {
-                println!(
-                    "denied tool attempt: {} -> {} (FormeError::ToolDenied)",
-                    tid,
-                    FormeError::PolicyDenied(tid.clone())
-                );
-                let err = FormeError::PolicyDenied(tid.clone());
-                println!("  is_denied(): {}", err.is_denied());
-            }
-            Err(other) => {
-                println!("unexpected policy error: {other}");
-            }
-        }
-
-        // ---- dispatch through the driver ------------------------------------
-        let out = block_on(driver.dispatch(event)).expect("dispatch ok");
-        println!("next_state: {}", out.next_state);
-        println!("action: {}", out.action);
-        println!("next_action: {:?}", out.next_action);
-        println!(
-            "llm_response: {}",
-            out.llm_response.as_deref().unwrap_or("(none)")
-        );
-        println!("prompt_missing: {}", out.prompt_missing);
-        println!();
+        run_turn(&mut driver, idx, event);
     }
 
     println!("current_state: {}", driver.current_state());
@@ -270,5 +305,5 @@ fn main() {
     }
 
     println!("State sequence: Greeting → CollectingInfo → Resolving → Done");
-    println!("Demo complete: 3-state FSM executed with policy enforcement and context building.");
+    println!("Demo complete: 4-state FSM executed with policy enforcement and context building.");
 }
