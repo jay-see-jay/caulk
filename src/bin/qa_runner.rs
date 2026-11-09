@@ -9,6 +9,7 @@
 //!   * replay determinism (prepare twice same output)
 //!   * snapshot comparison reading `tests/snapshots/hello-world.txt`
 //!   * driver check (SessionDriver dispatch, halt, resume, dispatch-after-halt)
+//!   * prompt coverage check (every Llm row in driver_table has a prompt)
 //! - Prints PASS/FAIL per check and overall
 //! - Exit 0 on success
 
@@ -19,7 +20,9 @@ use caulk::policy::{AllowAllPolicy, AllowListPolicy, Policy};
 use caulk::prompt_registry::{InMemoryRegistry, Registry};
 use caulk::rig_adapter::MockLlm;
 use caulk::transition::{Action, Transition, TransitionTable};
-use caulk::{DispatchOutput, NextAction, Runner, SessionDriver};
+use caulk::{
+    check_prompt_coverage, CoverageReport, DispatchOutput, NextAction, Runner, SessionDriver,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -360,6 +363,54 @@ fn driver_check(
     true
 }
 
+/// Check 6: prompt coverage — every `Llm` row in the table has a prompt in
+/// the registry; `Silent`/`Halt` rows are skipped, never missing.
+/// Prints the PASS line itself (main cannot format the report).
+/// Returns false on the first mismatch, after printing a diagnostic.
+fn coverage_check(table: &TransitionTable<AppState>, registry: &InMemoryRegistry) -> bool {
+    let name = "coverage_check";
+    let report: CoverageReport = match check_prompt_coverage(table, registry) {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!("FAIL {name}: coverage check error: {e}");
+            return false;
+        }
+    };
+    if let Some(diagnostic) = coverage_mismatch(&report) {
+        eprintln!("FAIL {name}: {diagnostic}");
+        return false;
+    }
+    println!("PASS {name} ({report})");
+    true
+}
+
+/// The first way `report` differs from the expected driver-table coverage,
+/// or `None` when it matches.
+fn coverage_mismatch(report: &CoverageReport) -> Option<String> {
+    if !report.is_complete() {
+        return Some(format!("expected complete coverage, got {report}"));
+    }
+    if report.total_rows != 2 || report.checked != 1 || report.covered != 1 {
+        return Some(format!(
+            "expected total_rows 2 checked 1 covered 1, got total_rows {} checked {} covered {}",
+            report.total_rows, report.checked, report.covered
+        ));
+    }
+    if !report.missing().is_empty() {
+        return Some(format!(
+            "expected no missing prompts, got {:?}",
+            report.missing()
+        ));
+    }
+    if report.skipped() != [(PromptKey::new("Done", "UserMsg"), Action::Halt)] {
+        return Some(format!(
+            "expected skipped [(Done::UserMsg, Halt)], got {:?}",
+            report.skipped()
+        ));
+    }
+    None
+}
+
 fn main() {
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -632,6 +683,14 @@ fn main() {
         failed += 1;
     }
 
+    // ── Check 6: prompt coverage ──────────────────────────────────────────
+    if coverage_check(&driver_table(), &registry) {
+        passed += 1;
+    } else {
+        println!("FAIL coverage_check");
+        failed += 1;
+    }
+
     // ── Overall ───────────────────────────────────────────────────────────
     println!();
     println!("Results: {passed} passed, {failed} failed");
@@ -641,5 +700,29 @@ fn main() {
     } else {
         println!("OVERALL FAIL");
         std::process::exit(1);
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 13. coverage_check_passes_on_driver_table
+    #[test]
+    fn coverage_check_passes_on_driver_table() {
+        assert!(coverage_check(&driver_table(), &make_registry()));
+    }
+
+    // 14. coverage_check_fails_on_missing_prompt
+    #[test]
+    fn coverage_check_fails_on_missing_prompt() {
+        let table = TransitionTable::new().with(
+            &AppState::new("Idle"),
+            &AppEvent::new("UserMsg"),
+            Transition::llm(AppState::new("Done")),
+        );
+        let empty = InMemoryRegistry::new(HashMap::new());
+        assert!(!coverage_check(&table, &empty));
     }
 }

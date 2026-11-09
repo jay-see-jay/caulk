@@ -9,10 +9,10 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 ## Quick start
 
 ```bash
-cargo test --lib                # 135 unit tests, core + registry + policy + runtime + scorer + transition + driver
+cargo test --lib                # 147 unit tests, core + registry + policy + runtime + scorer + transition + driver + coverage
 cargo run --example hello_world # Idle/Done FSM demo with MockLlm, no network
 cargo run --example support_bot # 4-state refund FSM, policy deny demo (now driven by `SessionDriver`)
-cargo run --bin qa_runner       # replay determinism + policy deny + snapshot + driver check (5 checks)
+cargo run --bin qa_runner       # replay determinism + policy deny + snapshot + driver check + prompt coverage (6 checks)
 cargo doc --no-deps             # public API leak check
 cargo fmt --check && cargo clippy -- -D warnings
 ```
@@ -51,7 +51,7 @@ use std::{collections::HashMap, sync::Arc};
   - `forme_next_to_gf(action, eager)` helper for `ContinueAndExecute` opt
   - enable with `--features graph-flow` (`graph-flow = 0.6`)
 
-Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 135, `--features rig,graph-flow` 140.
+Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 147, `--features rig,graph-flow` 152.
 
 ### Generic design
 
@@ -63,6 +63,7 @@ Both together: `--features rig,graph-flow` or `--features full`. All tests pass:
 - `LlmAdapter<E>`: async trait `call(prompt, context) -> String`, `MockLlm` with canned or closure
 - `Runner<S,E,R,B,P,L>`: deterministic `prepare` (pure) + `step` (async LLM), `handle_edge` for graph-flow
 - `SessionDriver<S,E,R,B,P,L,C>`: owns `Runner` + `TransitionTable` + `Checkpointer` + current state + halted flag + history; `dispatch(event) -> DispatchOutput` resolves the transition before stepping, steps the current state, persists the next state; `Silent` skips `step` entirely, `Halt` is terminal, `prompt_missing` surfaces verbatim in the output.
+- `check_prompt_coverage(table, registry) -> Result<CoverageReport, FormeError>`: enumerates the transition table's `Llm` rows and checks each against the prompt registry; `Silent`/`Halt` rows are reported as skipped, never missing; a non-not-found registry error propagates instead of reading as missing; `qa_runner` check 6 fails the build on any missing prompt.
 
 ## Build waves (BFS)
 
@@ -74,6 +75,7 @@ Both together: `--features rig,graph-flow` or `--features full`. All tests pass:
 - Wave 5: rig real adapters (`RigModelAdapter`, `ClosureAdapter`, `RigAgentAdapter`, `RigAgentFactory`) + graph-flow (`FormeGraphBuilder`, `FormeTask`, `FormeLlmTask`, `NextAction` conversion) — feature-gated, MockLlm non-breaking, 85 tests with `rig,graph-flow`
 - Wave 6: transition module — pure `(state, event) -> (next_state, action)` function + `TransitionTable` keyed by `PromptKey`, explicit `TransitionMiss` error, deterministic sorted `keys()`/`entries()` (111 lib tests, 116 with `rig,graph-flow`)
 - Wave 7: session driver — `SessionDriver` + `DispatchOutput`, transition-before-step, persistence round-trip, dispatch-after-halt error, `session-driver-flow` diagram (135 lib tests, 140 with `rig,graph-flow`)
+- Wave 8: prompt coverage — `check_prompt_coverage` + `CoverageReport`, only `Llm` rows require a prompt, `qa_runner` check 6 fails on missing prompts, `prompt-coverage-flow` diagram (147 lib tests, 152 with `rig,graph-flow`)
 
 Each wave must pass `cargo test` before next.
 
@@ -91,6 +93,7 @@ Each wave must pass `cargo test` before next.
 ```
 src/
   core/          # Event/State/PromptKey/ToolId/FormeError
+  coverage/      # check_prompt_coverage, CoverageReport
   driver/        # SessionDriver, DispatchOutput
   prompt_registry/ # Registry trait + FsRegistry + InMemoryRegistry
   policy/        # Policy trait + implementations
@@ -110,6 +113,7 @@ tests/
 docs/
   diagrams/
     session-driver-flow.excalidraw # session driver flow diagram
+    prompt-coverage-flow.excalidraw # prompt coverage flow diagram
 ```
 
 See also: `../forme-BLUEPRINT.md` for spec.
