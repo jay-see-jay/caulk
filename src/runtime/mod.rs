@@ -24,7 +24,9 @@
 //! Design choices
 //! * Generic only — no Ferriswheel / Inkwell / Loom concrete types.
 //! * Deterministic — `prepare` is pure of `(state, event, history, registry, builder)`.
-//!   Calling it twice with identical inputs yields identical prompt/context/tool_plan.
+//!   Calling it twice with identical inputs yields identical
+//!   prompt/context/tool_plan/score/`prompt_missing` (the score is
+//!   deterministic when the scorer is; the built-in and mock scorers are).
 //! * `step` is async and calls `LlmAdapter::call`. Errors from the LLM are
 //!   normalized to `FormeError::LlmFailed`.
 //! * Minimal `graph-flow` coupling — we define our own `NextAction<S>`
@@ -93,9 +95,10 @@ impl<'a> IntoIterator for &'a ToolPlan {
 
 /// Prepared inputs before LLM call — pure and replayable.
 ///
-/// `score` is `Some` only when a `Scorer` is installed on the runner
-/// (see `Runner::with_scorer`), or when a missing prompt was turned
-/// into silence (see `Runner::with_missing_prompt_silent`). It is
+/// `score` is `Some` exactly when a `Scorer` is installed on the runner
+/// (see `Runner::with_scorer`); with no scorer installed it is always
+/// `None`, including on a prompt miss. A miss never synthesises a score:
+/// `prompt_missing` is the only signal that a miss happened.
 /// `PartialEq` but not `Eq` because `Score` carries an `f32`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prepared {
@@ -104,12 +107,22 @@ pub struct Prepared {
     pub context: String,
     pub tool_plan: ToolPlan,
     pub score: Option<Score>,
+    /// True when the registry had no prompt for `key` and the miss was
+    /// absorbed by `with_missing_prompt_silent(true)`; `prompt` is then
+    /// always empty. Never a substitute for a score — it is orthogonal to
+    /// `score`, so all four combinations are reachable.
+    pub prompt_missing: bool,
 }
 
 /// Full output after LLM call.
 ///
-/// `score` is copied from `Prepared`. When the score's verdict is
-/// `Verdict::Silent`, `step` skips the LLM and `llm_response` is empty.
+/// `score` is copied from `Prepared`. `prompt_missing` is copied verbatim
+/// from `Prepared`: it is true exactly when the prompt was missing and the
+/// miss was absorbed by the silent flag. When the score's verdict is
+/// `Verdict::Silent`, `step` skips the LLM and `llm_response` is empty;
+/// a miss with no score also skips the LLM (miss + no judgment = no
+/// opinion). A miss with a non-`Silent` verdict still calls the LLM —
+/// the scorer's verdict is never second-guessed.
 /// `PartialEq` but not `Eq` (see `Prepared`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepOutput<S> {
@@ -123,6 +136,9 @@ pub struct StepOutput<S> {
     pub llm_response: String,
     pub tool_plan: ToolPlan,
     pub score: Option<Score>,
+    /// Copied verbatim from `Prepared` — true iff the prompt was missing
+    /// and the miss was absorbed by `with_missing_prompt_silent(true)`.
+    pub prompt_missing: bool,
 }
 
 /// Minimal graph-flow `NextAction` stand-in.
@@ -166,7 +182,10 @@ where
     scorer: Option<Arc<dyn Scorer<S, E>>>,
     /// When true, a missing prompt means "no opinion for this
     /// (state, event)" instead of `RegistryNotFound`: prepare succeeds
-    /// with an empty prompt and a forced `Silent` score.
+    /// with an empty prompt and `prompt_missing == true`. The miss is
+    /// never a substitute for a score — an installed scorer is still
+    /// consulted and its verdict preserved verbatim; with no scorer,
+    /// `score` stays `None`.
     missing_prompt_silent: bool,
     _state: std::marker::PhantomData<S>,
     _event: std::marker::PhantomData<E>,
@@ -213,8 +232,14 @@ where
     /// (builder-style; Wave A).
     ///
     /// With `yes = true`, a `RegistryNotFound` from the registry no
-    /// longer fails `prepare`/`step`: the prompt is empty and the score
-    /// is forced to `Silent @ 1.0`, overriding any installed scorer.
+    /// longer fails `prepare`/`step`: the prompt is empty and
+    /// `prompt_missing` is set to `true` on `Prepared` / `StepOutput`.
+    /// The miss never overrides an installed scorer — the scorer is
+    /// still consulted and its verdict rides in `score` verbatim — and
+    /// with no scorer installed `score` stays `None`. In `step`, the
+    /// LLM is skipped when the scorer said `Silent`, or when the prompt
+    /// was missing and there is no score at all; a miss with a
+    /// non-`Silent` verdict still calls the LLM with the empty prompt.
     /// This makes "no prompt file for this (state, event)" a deliberate
     /// no-opinion path — the normal case in a realtime event stream,
     /// where most (state, event) pairs should not wake the agent.
@@ -257,17 +282,22 @@ where
     /// 1. `PromptKey::key_for(state, event)` — canonical key
     /// 2. `policy.allowed(state)` — tool allowlist snapshot (`ToolPlan`)
     /// 3. `registry.get(key)` — prompt text. On `RegistryNotFound`, if
-    ///    `missing_prompt_silent` is set: empty prompt + forced
-    ///    `Silent @ 1.0` score (step 5 is overridden); otherwise the
-    ///    error propagates as before.
+    ///    `missing_prompt_silent` is set: empty prompt and
+    ///    `prompt_missing == true` (the scorer is still consulted in
+    ///    step 5 — a miss never synthesises or overrides a score);
+    ///    otherwise the error propagates as before.
     /// 4. `builder.build(event, history)` — context string
     /// 5. `scorer.score(state, event, tool_plan)` — if a scorer is
-    ///    installed, its verdict rides in `Prepared.score`.
+    ///    installed, its verdict rides in `Prepared.score` verbatim,
+    ///    including on a prompt miss. With no scorer installed,
+    ///    `Prepared.score` is always `None`.
     ///
     /// Calling `prepare` twice with identical `(state, event, history)` and
     /// unchanged registry / builder yields identical output (replay property).
-    /// The replay property covers the score too when the scorer is
-    /// deterministic (the built-in and mock scorers are).
+    /// The replay property covers the score and `prompt_missing` too:
+    /// the flag is a pure function of the registry contents for `key` and
+    /// `missing_prompt_silent`, and the score is deterministic when the
+    /// scorer is (the built-in and mock scorers are).
     pub fn prepare(&self, state: &S, event: &E, history: &[E]) -> Result<Prepared, FormeError> {
         let key = PromptKey::key_for(state, event);
         let allowed = self.policy.allowed(state).to_vec();
@@ -283,32 +313,35 @@ where
             }
         };
         let context = self.builder.build(event, history)?;
-        let mut score = self
+        let score = self
             .scorer
             .as_ref()
             .map(|scorer| scorer.score(state, event, &tool_plan));
-        if prompt_missing {
-            score = Some(Score::silent());
-        }
         Ok(Prepared {
             key,
             prompt,
             context,
             tool_plan,
             score,
+            prompt_missing,
         })
     }
 
     /// Full step including LLM call.
     ///
     /// `history` is a caller-chosen sliding window (e.g. last 10 events).
-    /// Determinism guarantee: `prompt`, `context`, and `tool_plan` are
-    /// deterministic given same inputs; `llm_response` is deterministic only
-    /// when the underlying `LlmAdapter` is deterministic (e.g. `MockLlm`).
+    /// Determinism guarantee: `prompt`, `context`, `tool_plan`, `score`,
+    /// and `prompt_missing` are deterministic given same inputs;
+    /// `llm_response` is deterministic only when the underlying
+    /// `LlmAdapter` is deterministic (e.g. `MockLlm`).
     ///
-    /// If the prepared score's verdict is `Silent`, the LLM is **not**
-    /// called and `llm_response` is empty — silence includes not paying
-    /// for (or waiting on) a completion nobody will use.
+    /// The LLM is **not** called — and `llm_response` is empty — when
+    /// the prepared score's verdict is `Silent`, or when the prompt was
+    /// missing and there is no score at all (miss + no judgment = no
+    /// opinion). A miss with a non-`Silent` verdict still calls the LLM
+    /// with the empty prompt: silence includes not paying for (or
+    /// waiting on) a completion nobody will use, but an installed
+    /// scorer's verdict is never second-guessed.
     pub async fn step(
         &self,
         state: &S,
@@ -317,7 +350,9 @@ where
     ) -> Result<StepOutput<S>, FormeError> {
         let prepared = self.prepare(state, event, history)?;
         let score = prepared.score;
-        let llm_response = if matches!(score, Some(s) if s.verdict == Verdict::Silent) {
+        let llm_response = if matches!(score, Some(s) if s.verdict == Verdict::Silent)
+            || (prepared.prompt_missing && score.is_none())
+        {
             String::new()
         } else {
             self.llm
@@ -337,6 +372,7 @@ where
             llm_response,
             tool_plan: prepared.tool_plan,
             score,
+            prompt_missing: prepared.prompt_missing,
         })
     }
 
@@ -794,16 +830,16 @@ mod tests {
         assert_eq!(prepared.score, Some(Score::new(Verdict::Act, 0.9)));
     }
 
-    // 13a. missing prompt + silent flag on → prepare/step succeed silently;
-    //      forced Silent overrides even an escalate-everything scorer
+    // 13a. missing prompt + silent flag on preserves an installed scorer's
+    //      verdict (no forced Silent): an escalate scorer still wakes the LLM
     #[test]
-    fn missing_prompt_silent_flag_on() {
+    fn missing_prompt_silent_flag_on_preserves_scorer_verdict() {
         let runner: Runner<TestState, TestEvent, _, _, _, _> =
             Runner::<TestState, TestEvent, _, _, _, _>::new(
                 Arc::new(make_registry()),
                 Arc::new(NoopBuilder),
                 Arc::new(AllowAllPolicy),
-                MockLlm::with_error("must not be called"),
+                MockLlm::with_response("canned answer"),
             )
             .with_scorer(escalate_scorer())
             .with_missing_prompt_silent(true);
@@ -812,27 +848,41 @@ mod tests {
 
         let prepared = runner.prepare(&state, &event, &[]).expect("prepare silent");
         assert_eq!(prepared.prompt, "");
-        assert_eq!(prepared.score, Some(Score::silent()));
+        assert_eq!(prepared.score, Some(Score::new(Verdict::Escalate, 1.0)));
+        assert!(prepared.prompt_missing);
         assert_eq!(prepared.key, PromptKey::new("MissingState", "MissingEvent"));
 
         let out = block_on(runner.step(&state, &event, &[])).expect("step silent");
-        assert_eq!(out.llm_response, "");
-        assert_eq!(out.score, Some(Score::silent()));
+        assert_eq!(out.llm_response, "canned answer");
+        assert_eq!(out.score, Some(Score::new(Verdict::Escalate, 1.0)));
+        assert!(out.prompt_missing);
+        assert_eq!(out.prompt, "");
     }
 
-    // 13b. missing prompt + silent flag on, no scorer → agent still gets a
-    //      score-free prompt absence turned into a Silent score
+    // 13b. missing prompt + silent flag on, no scorer → score stays None;
+    //      the miss is carried by the flag alone, and step skips the LLM
     #[test]
-    fn missing_prompt_silent_without_scorer() {
-        let runner = make_runner_with_response("unused").with_missing_prompt_silent(true);
-        let prepared = runner
-            .prepare(
-                &TestState::new("MissingState"),
-                &TestEvent::new("MissingEvent"),
-                &[],
+    fn missing_prompt_silent_without_scorer_keeps_score_none() {
+        let runner: Runner<TestState, TestEvent, _, _, _, _> =
+            Runner::<TestState, TestEvent, _, _, _, _>::new(
+                Arc::new(make_registry()),
+                Arc::new(NoopBuilder),
+                Arc::new(AllowAllPolicy),
+                MockLlm::with_error("must not be called"),
             )
-            .unwrap();
-        assert_eq!(prepared.score, Some(Score::silent()));
+            .with_missing_prompt_silent(true);
+        let state = TestState::new("MissingState");
+        let event = TestEvent::new("MissingEvent");
+
+        let prepared = runner.prepare(&state, &event, &[]).expect("prepare silent");
+        assert_eq!(prepared.prompt, "");
+        assert_eq!(prepared.score, None);
+        assert!(prepared.prompt_missing);
+
+        let out = block_on(runner.step(&state, &event, &[])).expect("step silent");
+        assert_eq!(out.llm_response, "");
+        assert_eq!(out.score, None);
+        assert!(out.prompt_missing);
     }
 
     // 13c. missing prompt + silent flag off → RegistryNotFound as before,
@@ -851,6 +901,112 @@ mod tests {
         assert!(err.is_not_found());
     }
 
+    // 13d. missing prompt + silent flag on + silent scorer → the scorer's
+    //      own Silent verdict skips the LLM (not a forced override)
+    #[test]
+    fn missing_prompt_silent_flag_on_silent_scorer_skips_llm() {
+        let runner: Runner<TestState, TestEvent, _, _, _, _> =
+            Runner::<TestState, TestEvent, _, _, _, _>::new(
+                Arc::new(make_registry()),
+                Arc::new(NoopBuilder),
+                Arc::new(AllowAllPolicy),
+                MockLlm::with_error("must not be called"),
+            )
+            .with_scorer(Arc::new(AlwaysSilentScorer))
+            .with_missing_prompt_silent(true);
+        let state = TestState::new("MissingState");
+        let event = TestEvent::new("MissingEvent");
+
+        let prepared = runner.prepare(&state, &event, &[]).expect("prepare silent");
+        assert_eq!(prepared.prompt, "");
+        assert!(prepared.prompt_missing);
+        assert_eq!(prepared.score, Some(Score::silent()));
+
+        let out = block_on(runner.step(&state, &event, &[])).expect("step silent");
+        assert_eq!(out.llm_response, "");
+        assert_eq!(out.score, Some(Score::silent()));
+        assert!(out.prompt_missing);
+    }
+
+    // 13e. present prompt + silent flag on → prompt_missing is false,
+    //      with and without a scorer
+    #[test]
+    fn present_prompt_flag_false() {
+        let state = TestState::new("Idle");
+        let event = TestEvent::new("UserMsg");
+
+        // (i) no scorer
+        let runner = make_runner_with_response("canned answer").with_missing_prompt_silent(true);
+        let prepared = runner.prepare(&state, &event, &[]).unwrap();
+        assert!(!prepared.prompt_missing);
+        assert_eq!(prepared.prompt, "you are idle, respond to user");
+        assert_eq!(prepared.score, None);
+        let out = block_on(runner.step(&state, &event, &[])).unwrap();
+        assert!(!out.prompt_missing);
+        assert_eq!(out.llm_response, "canned answer");
+
+        // (ii) escalate scorer
+        let runner = make_runner_with_response("canned answer")
+            .with_scorer(escalate_scorer())
+            .with_missing_prompt_silent(true);
+        let prepared = runner.prepare(&state, &event, &[]).unwrap();
+        assert!(!prepared.prompt_missing);
+        assert_eq!(prepared.prompt, "you are idle, respond to user");
+        assert_eq!(prepared.score, Some(Score::new(Verdict::Escalate, 1.0)));
+        let out = block_on(runner.step(&state, &event, &[])).unwrap();
+        assert!(!out.prompt_missing);
+        assert_eq!(out.llm_response, "canned answer");
+    }
+
+    // 13f. replay determinism covers prompt_missing (and score)
+    #[test]
+    fn replay_determinism_covers_prompt_missing() {
+        let runner = make_runner_with_response("canned answer")
+            .with_scorer(escalate_scorer())
+            .with_missing_prompt_silent(true);
+        let state = TestState::new("MissingState");
+        let event = TestEvent::new("MissingEvent");
+        let history = vec![TestEvent::new("h1"), TestEvent::new("h2")];
+
+        let p1 = runner.prepare(&state, &event, &history).unwrap();
+        let p2 = runner.prepare(&state, &event, &history).unwrap();
+        assert_eq!(p1, p2);
+        assert!(p1.prompt_missing && p2.prompt_missing);
+        assert_eq!(p1.score, p2.score);
+
+        let o1 = block_on(runner.step(&state, &event, &history)).unwrap();
+        let o2 = block_on(runner.step(&state, &event, &history)).unwrap();
+        assert_eq!(o1.prompt_missing, o2.prompt_missing);
+        assert_eq!(o1.llm_response, o2.llm_response);
+    }
+
+    // 13g. StepOutput.prompt_missing mirrors Prepared.prompt_missing
+    //      (miss → true, present → false) and scores match too
+    #[test]
+    fn step_output_prompt_missing_mirrors_prepared() {
+        let runner = make_runner_with_response("canned answer")
+            .with_scorer(escalate_scorer())
+            .with_missing_prompt_silent(true);
+
+        // miss case
+        let state = TestState::new("MissingState");
+        let event = TestEvent::new("MissingEvent");
+        let prepared = runner.prepare(&state, &event, &[]).unwrap();
+        let out = block_on(runner.step(&state, &event, &[])).unwrap();
+        assert_eq!(out.prompt_missing, prepared.prompt_missing);
+        assert!(out.prompt_missing);
+        assert_eq!(out.score, prepared.score);
+
+        // present case
+        let state = TestState::new("Idle");
+        let event = TestEvent::new("UserMsg");
+        let prepared = runner.prepare(&state, &event, &[]).unwrap();
+        let out = block_on(runner.step(&state, &event, &[])).unwrap();
+        assert_eq!(out.prompt_missing, prepared.prompt_missing);
+        assert!(!out.prompt_missing);
+        assert_eq!(out.score, prepared.score);
+    }
+
     // 14. no scorer configured → score is None and behaviour is unchanged
     #[test]
     fn no_scorer_score_none() {
@@ -860,8 +1016,10 @@ mod tests {
         let event = TestEvent::new("UserMsg");
         let prepared = runner.prepare(&state, &event, &[]).unwrap();
         assert_eq!(prepared.score, None);
+        assert!(!prepared.prompt_missing);
         let out = block_on(runner.step(&state, &event, &[])).unwrap();
         assert_eq!(out.score, None);
+        assert!(!out.prompt_missing);
         assert_eq!(out.llm_response, "canned answer");
     }
 
