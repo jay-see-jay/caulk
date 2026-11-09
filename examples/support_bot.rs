@@ -1,25 +1,39 @@
-//! support_bot — 3-state refund FSM with policy deny demo
+//! support_bot — 4-state refund FSM driven by `SessionDriver`
 //!
-//! States: Greeting -> CollectingInfo -> Resolving
+//! States: Greeting -> CollectingInfo -> Resolving -> Done
 //! Events: UserAskedRefund, InfoProvided, RefundRequested
 //! Demonstrates:
 //! - ParagraphBuilder for prose context
 //! - InMemoryRegistry with per-state prompts
 //! - Custom per-state Policy (SupportPolicy)
-//! - Runner::prepare, Runner::step (MockLlm), Runner::handle_edge
+//! - SessionDriver::dispatch (transition resolved before any LLM call)
 //! - ToolDenied via FormeError
+//! - Dispatch-after-halt errors with FormeError::SessionHalted
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use caulk::context_builder::{ContextBuilder, ParagraphBuilder};
+use caulk::context_builder::ParagraphBuilder;
 use caulk::core::{FormeError, PromptKey, ToolId};
+use caulk::persistence::InMemoryCheckpointer;
 use caulk::policy::Policy;
 use caulk::prompt_registry::InMemoryRegistry;
 use caulk::rig_adapter::MockLlm;
-use caulk::runtime::{NextAction, Runner};
+use caulk::runtime::Runner;
+use caulk::transition::{Transition, TransitionTable};
+use caulk::SessionDriver;
 use serde::{Deserialize, Serialize};
+
+type SupportDriver = SessionDriver<
+    SupportState,
+    SupportEvent,
+    InMemoryRegistry,
+    ParagraphBuilder,
+    SupportPolicy,
+    MockLlm,
+    InMemoryCheckpointer<SupportState>,
+>;
 
 // ── State ─────────────────────────────────────────────────────────────────
 
@@ -28,6 +42,7 @@ enum SupportState {
     Greeting,
     CollectingInfo,
     Resolving,
+    Done,
 }
 
 impl fmt::Display for SupportState {
@@ -36,6 +51,7 @@ impl fmt::Display for SupportState {
             Self::Greeting => write!(f, "Greeting"),
             Self::CollectingInfo => write!(f, "CollectingInfo"),
             Self::Resolving => write!(f, "Resolving"),
+            Self::Done => write!(f, "Done"),
         }
     }
 }
@@ -92,6 +108,7 @@ impl Policy<SupportState> for SupportPolicy {
             SupportState::Greeting => &self.greeting_allowed,
             SupportState::CollectingInfo => &self.collecting_allowed,
             SupportState::Resolving => &self.resolving_allowed,
+            SupportState::Done => &[],
         }
     }
 }
@@ -120,8 +137,16 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     }
 }
 
-fn main() {
-    // ── Registry (3-4 entries, each state different prompt) ──────────────────
+fn denied_tool_for(state: &SupportState) -> ToolId {
+    match state {
+        SupportState::Greeting | SupportState::CollectingInfo => ToolId::from("process_refund"),
+        SupportState::Resolving | SupportState::Done => ToolId::from("ask_clarification"),
+    }
+}
+
+// ── Registry (exactly 2 entries — the Halt row never steps) ───────────────
+
+fn support_registry() -> Arc<InMemoryRegistry> {
     let mut map: HashMap<PromptKey, String> = HashMap::new();
     map.insert(
         PromptKey::new("Greeting", "UserAskedRefund"),
@@ -137,159 +162,148 @@ fn main() {
          order ID or reason. Do not refund yet. Keep tone supportive."
             .into(),
     );
-    map.insert(
-        PromptKey::new("Resolving", "RefundRequested"),
-        "You are in RESOLVING. User explicitly requested refund. \
-         Verify eligibility via read_profile/read_order, then use process_refund \
-         if allowed. Summarize outcome clearly."
-            .into(),
-    );
-    // extra 4th entry to show registry size >3
-    map.insert(
-        PromptKey::new("Greeting", "RefundRequested"),
-        "GREETING fallback for refund request: still greet and route to collection.".into(),
-    );
+    Arc::new(InMemoryRegistry::new(map))
+}
 
-    let registry = Arc::new(InMemoryRegistry::new(map));
+// ── LLM (MockLlm returns a different response per prompt) ──────────────────
 
-    // ── Context builder (ParagraphBuilder prose, N=2) ────────────────────────
+fn greeting_reply(context: &str) -> String {
+    format!(
+        "Hello! I can help with refunds. I’ll look up your profile/order. \
+         [seen context: {}]",
+        context.chars().take(80).collect::<String>()
+    )
+}
+
+fn collecting_reply() -> String {
+    "Thanks for the info. I’ve checked your profile and order. \
+     Could you confirm the order ID and reason? (ask_clarification) \
+     [collecting_info]"
+        .to_string()
+}
+
+fn fallback_reply(prompt: &str) -> String {
+    format!(
+        "Fallback response for prompt: {}",
+        prompt.chars().take(60).collect::<String>()
+    )
+}
+
+fn reply_for_prompt(prompt: String, context: String) -> Result<String, FormeError> {
+    let lower = prompt.to_lowercase();
+    if lower.contains("greeting") {
+        Ok(greeting_reply(&context))
+    } else if lower.contains("collecting") {
+        Ok(collecting_reply())
+    } else {
+        Ok(fallback_reply(&prompt))
+    }
+}
+
+fn support_table() -> TransitionTable<SupportState> {
+    TransitionTable::new()
+        .with(
+            &SupportState::Greeting,
+            &SupportEvent::UserAskedRefund,
+            Transition::llm(SupportState::CollectingInfo),
+        )
+        .with(
+            &SupportState::CollectingInfo,
+            &SupportEvent::InfoProvided("order #12345, bought yesterday".into()),
+            Transition::llm(SupportState::Resolving),
+        )
+        .with(
+            &SupportState::Resolving,
+            &SupportEvent::RefundRequested,
+            Transition::halt(SupportState::Done),
+        )
+}
+
+fn print_denied(tid: &ToolId) {
+    println!(
+        "denied tool attempt: {} -> {} (FormeError::PolicyDenied)",
+        tid,
+        FormeError::PolicyDenied(tid.clone())
+    );
+    let err = FormeError::PolicyDenied(tid.clone());
+    println!("  is_denied(): {}", err.is_denied());
+}
+
+fn policy_deny_demo(driver: &SupportDriver, state: &SupportState) {
+    let denied_attempt = denied_tool_for(state);
+    match driver.runner().policy().check(state, &denied_attempt) {
+        Ok(()) => {
+            println!(
+                "tool check: {} allowed (expected deny for demo, but allowed)",
+                denied_attempt
+            );
+        }
+        Err(FormeError::PolicyDenied(tid)) => print_denied(&tid),
+        Err(other) => {
+            println!("unexpected policy error: {other}");
+        }
+    }
+}
+
+fn run_turn(driver: &mut SupportDriver, idx: usize, event: &SupportEvent) {
+    let state = driver.current_state().clone();
+    println!("=== Turn {}: State={} Event={} ===", idx + 1, state, event);
+
+    // ---- policy deny demo ----------------------------------------------
+    policy_deny_demo(driver, &state);
+
+    // ---- dispatch through the driver ------------------------------------
+    let out = block_on(driver.dispatch(event)).expect("dispatch ok");
+    println!("next_state: {}", out.next_state);
+    println!("action: {}", out.action);
+    println!("next_action: {:?}", out.next_action);
+    println!(
+        "llm_response: {}",
+        out.llm_response.as_deref().unwrap_or("(none)")
+    );
+    println!("prompt_missing: {}", out.prompt_missing);
+    println!();
+}
+
+fn main() {
+    let registry = support_registry();
     let builder = Arc::new(ParagraphBuilder::with_n(2));
-
-    // demonstrate builder is generic and Send+Sync
-    let _builder_check: &dyn ContextBuilder<SupportEvent> = builder.as_ref();
-
-    // ── Policy ───────────────────────────────────────────────────────────────
     let policy = Arc::new(SupportPolicy::new());
-
-    // ── LLM (MockLlm closure returns different response per prompt) ─────────
-    let llm = MockLlm::with_fn(|prompt: String, context: String| {
-        let lower = prompt.to_lowercase();
-        let resp = if lower.contains("greeting") {
-            format!(
-                "Hello! I can help with refunds. I’ll look up your profile/order. \
-                 [seen context: {}]",
-                context.chars().take(80).collect::<String>()
-            )
-        } else if lower.contains("collecting") {
-            "Thanks for the info. I’ve checked your profile and order. \
-             Could you confirm the order ID and reason? (ask_clarification) \
-             [collecting_info]"
-                .to_string()
-        } else if lower.contains("resolving") {
-            "Refund eligible. I have processed your refund of $42.50 via \
-             process_refund. You’ll see it in 3-5 days. [resolving]"
-                .to_string()
-        } else {
-            format!(
-                "Fallback response for prompt: {}",
-                prompt.chars().take(60).collect::<String>()
-            )
-        };
-        Ok(resp)
-    });
-
-    // ── Runner ───────────────────────────────────────────────────────────────
+    let llm = MockLlm::with_fn(reply_for_prompt);
     let runner = Runner::new(
         Arc::clone(&registry),
         Arc::clone(&builder),
         Arc::clone(&policy),
         llm,
     );
+    let mut driver = SessionDriver::new(
+        runner,
+        support_table(),
+        InMemoryCheckpointer::new(),
+        SupportState::Greeting,
+    );
 
     // ── Simulate 3-turn conversation ───────────────────────────────────────
-    let turns: Vec<(SupportState, SupportEvent)> = vec![
-        (SupportState::Greeting, SupportEvent::UserAskedRefund),
-        (
-            SupportState::CollectingInfo,
-            SupportEvent::InfoProvided("order #12345, bought yesterday".into()),
-        ),
-        (SupportState::Resolving, SupportEvent::RefundRequested),
+    let events: Vec<SupportEvent> = vec![
+        SupportEvent::UserAskedRefund,
+        SupportEvent::InfoProvided("order #12345, bought yesterday".into()),
+        SupportEvent::RefundRequested,
     ];
 
-    let mut history: Vec<SupportEvent> = Vec::new();
-
-    for (idx, (state, event)) in turns.iter().enumerate() {
-        println!("=== Turn {}: State={} Event={} ===", idx + 1, state, event);
-
-        // ---- prepare (pure, deterministic) ---------------------------------
-        let prepared = runner
-            .prepare(state, event, &history)
-            .expect("prepare should succeed");
-        println!(
-            "prompt_key: {} (canonical {})",
-            prepared.key,
-            prepared.key.canonical()
-        );
-        println!("prompt: {}", prepared.prompt);
-        println!("context (ParagraphBuilder N=2): {}", prepared.context);
-        let allowed_strs: Vec<String> = prepared
-            .tool_plan
-            .allowed
-            .iter()
-            .map(|t| t.to_string())
-            .collect();
-        println!("allowed tools: {:?}", allowed_strs);
-
-        // ---- policy deny demo ----------------------------------------------
-        let denied_attempt: ToolId = match state {
-            SupportState::Greeting => ToolId::from("process_refund"),
-            SupportState::CollectingInfo => ToolId::from("process_refund"),
-            SupportState::Resolving => ToolId::from("ask_clarification"),
-        };
-
-        match runner.policy().check(state, &denied_attempt) {
-            Ok(()) => {
-                println!(
-                    "tool check: {} allowed (expected deny for demo, but allowed)",
-                    denied_attempt
-                );
-            }
-            Err(FormeError::PolicyDenied(tid)) => {
-                println!(
-                    "denied tool attempt: {} -> {} (FormeError::ToolDenied)",
-                    tid,
-                    FormeError::PolicyDenied(tid.clone())
-                );
-                // show is_denied helper
-                let err = FormeError::PolicyDenied(tid.clone());
-                println!("  is_denied(): {}", err.is_denied());
-            }
-            Err(other) => {
-                println!("unexpected policy error: {other}");
-            }
-        }
-
-        // ---- full step with LLM --------------------------------------------
-        let step_out = block_on(runner.step(state, event, &history)).expect("step ok");
-        println!("llm_response: {}", step_out.llm_response);
-        println!(
-            "tool_plan snapshot len {} contains refund? {}",
-            step_out.tool_plan.len(),
-            step_out.tool_plan.contains(&ToolId::from("process_refund"))
-        );
-
-        // ---- handle_edge with NextAction::Transition ------------------------
-        if idx + 1 < turns.len() {
-            let next_state = turns[idx + 1].0.clone();
-            let action = NextAction::Transition(next_state.clone());
-            let next_key = runner.handle_edge(&action, state, event);
-            println!(
-                "handle_edge NextAction::Transition({}) -> PromptKey {}",
-                next_state, next_key
-            );
-            // also show Next stays same
-            let stay_action = NextAction::Next;
-            let stay_key = runner.handle_edge(&stay_action, state, event);
-            println!("handle_edge NextAction::Next stays -> {}", stay_key);
-        } else {
-            let halt = NextAction::Halt;
-            let halt_key = runner.handle_edge(&halt, state, event);
-            println!("handle_edge NextAction::Halt -> {} (logging)", halt_key);
-        }
-
-        println!();
-        history.push(event.clone());
+    for (idx, event) in events.iter().enumerate() {
+        run_turn(&mut driver, idx, event);
     }
 
-    println!("Demo complete: 3-state FSM executed with policy enforcement and context building.");
+    println!("current_state: {}", driver.current_state());
+    println!("is_halted: {}", driver.is_halted());
+    println!("history length: {}", driver.history().len());
+
+    // ---- dispatch after halt: must error, must not panic --------------------
+    match block_on(driver.dispatch(&SupportEvent::RefundRequested)) {
+        Ok(out) => println!("unexpected success after halt: {out:?}"),
+        Err(err) => println!("SessionHalted error: {err}"),
+    }
+
+    println!("State sequence: Greeting → CollectingInfo → Resolving → Done");
+    println!("Demo complete: 4-state FSM executed with policy enforcement and context building.");
 }

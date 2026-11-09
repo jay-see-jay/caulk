@@ -169,6 +169,9 @@ pub enum FormeError {
 
     #[error("no transition for {0}")]
     TransitionMiss(PromptKey),
+
+    #[error("session halted in state {0}")]
+    SessionHalted(String),
 }
 
 impl FormeError {
@@ -182,6 +185,10 @@ impl FormeError {
 
     pub fn is_transition_miss(&self) -> bool {
         matches!(self, Self::TransitionMiss(_))
+    }
+
+    pub fn is_session_halted(&self) -> bool {
+        matches!(self, Self::SessionHalted(_))
     }
 }
 
@@ -379,6 +386,7 @@ mod tests {
             ),
             (FormeError::LlmFailed("timeout".into()), "timeout"),
             (FormeError::InvalidInput("bad json".into()), "bad json"),
+            (FormeError::SessionHalted("Done".into()), "Done"),
         ];
 
         for (err, payload) in variants {
@@ -393,6 +401,19 @@ mod tests {
         let denied = FormeError::PolicyDenied(ToolId::from("search"));
         assert!(denied.is_denied());
         assert!(!denied.is_not_found());
+    }
+
+    // 10b. session_halted_display_and_helper
+    #[test]
+    fn session_halted_display_and_helper() {
+        let err = FormeError::SessionHalted("Done".into());
+        let msg = err.to_string();
+        assert!(msg.contains("session halted"), "msg was: {msg}");
+        assert!(msg.contains("Done"), "msg was: {msg}");
+        assert!(err.is_session_halted());
+        assert!(!err.is_not_found());
+        assert!(!err.is_denied());
+        assert!(!err.is_transition_miss());
     }
 
     // 9. trait_bounds_compile_check (assert generic compiles)
