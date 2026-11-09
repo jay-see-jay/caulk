@@ -9,7 +9,7 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 ## Quick start
 
 ```bash
-cargo test --lib                # 80 unit tests, core + registry + policy + runtime
+cargo test --lib                # 111 unit tests, core + registry + policy + runtime + scorer + transition
 cargo run --example hello_world # Idle/Done FSM demo with MockLlm, no network
 cargo run --example support_bot # 3-state refund FSM, policy deny demo
 cargo run --bin qa_runner       # replay determinism + policy deny + snapshot
@@ -51,7 +51,7 @@ use std::{collections::HashMap, sync::Arc};
   - `forme_next_to_gf(action, eager)` helper for `ContinueAndExecute` opt
   - enable with `--features graph-flow` (`graph-flow = 0.6`)
 
-Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 80, `--features rig,graph-flow` 85.
+Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 111, `--features rig,graph-flow` 116.
 
 ### Generic design
 
@@ -71,6 +71,7 @@ Both together: `--features rig,graph-flow` or `--features full`. All tests pass:
 - Wave 3: runtime Runner::prepare/step/handle_edge, ToolPlan (12 tests)
 - Wave 4: examples (`hello_world`, `support_bot`) + `qa_runner` + fixtures/snapshots (80+ total lib tests)
 - Wave 5: rig real adapters (`RigModelAdapter`, `ClosureAdapter`, `RigAgentAdapter`, `RigAgentFactory`) + graph-flow (`FormeGraphBuilder`, `FormeTask`, `FormeLlmTask`, `NextAction` conversion) — feature-gated, MockLlm non-breaking, 85 tests with `rig,graph-flow`
+- Wave 6: transition module — pure `(state, event) -> (next_state, action)` function + `TransitionTable` keyed by `PromptKey`, explicit `TransitionMiss` error, deterministic sorted `keys()`/`entries()` (111 lib tests, 116 with `rig,graph-flow`)
 
 Each wave must pass `cargo test` before next.
 

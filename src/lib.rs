@@ -14,9 +14,13 @@ pub mod policy;
 pub mod prompt_registry;
 pub mod rig_adapter;
 pub mod runtime;
+pub mod scorer;
+pub mod transition;
 
 pub use core::{Event, FormeError, PromptKey, State, ToolId};
 pub use runtime::{NextAction, Runner, StepOutput, ToolPlan};
+pub use scorer::{AlwaysEscalateScorer, AlwaysSilentScorer, MockScorer, Score, Scorer, Verdict};
+pub use transition::{transition, Action, Transition, TransitionMiss, TransitionTable};
 
 /// Re-exported version string
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
