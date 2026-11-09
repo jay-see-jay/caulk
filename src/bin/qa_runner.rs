@@ -376,33 +376,39 @@ fn coverage_check(table: &TransitionTable<AppState>, registry: &InMemoryRegistry
             return false;
         }
     };
-    if !report.is_complete() {
-        eprintln!("FAIL {name}: expected complete coverage, got {report}");
-        return false;
-    }
-    if report.total_rows != 2 || report.checked != 1 || report.covered != 1 {
-        eprintln!(
-            "FAIL {name}: expected total_rows 2 checked 1 covered 1, got total_rows {} checked {} covered {}",
-            report.total_rows, report.checked, report.covered
-        );
-        return false;
-    }
-    if !report.missing().is_empty() {
-        eprintln!(
-            "FAIL {name}: expected no missing prompts, got {:?}",
-            report.missing()
-        );
-        return false;
-    }
-    if report.skipped() != [(PromptKey::new("Done", "UserMsg"), Action::Halt)] {
-        eprintln!(
-            "FAIL {name}: expected skipped [(Done::UserMsg, Halt)], got {:?}",
-            report.skipped()
-        );
+    if let Some(diagnostic) = coverage_mismatch(&report) {
+        eprintln!("FAIL {name}: {diagnostic}");
         return false;
     }
     println!("PASS {name} ({report})");
     true
+}
+
+/// The first way `report` differs from the expected driver-table coverage,
+/// or `None` when it matches.
+fn coverage_mismatch(report: &CoverageReport) -> Option<String> {
+    if !report.is_complete() {
+        return Some(format!("expected complete coverage, got {report}"));
+    }
+    if report.total_rows != 2 || report.checked != 1 || report.covered != 1 {
+        return Some(format!(
+            "expected total_rows 2 checked 1 covered 1, got total_rows {} checked {} covered {}",
+            report.total_rows, report.checked, report.covered
+        ));
+    }
+    if !report.missing().is_empty() {
+        return Some(format!(
+            "expected no missing prompts, got {:?}",
+            report.missing()
+        ));
+    }
+    if report.skipped() != [(PromptKey::new("Done", "UserMsg"), Action::Halt)] {
+        return Some(format!(
+            "expected skipped [(Done::UserMsg, Halt)], got {:?}",
+            report.skipped()
+        ));
+    }
+    None
 }
 
 fn main() {

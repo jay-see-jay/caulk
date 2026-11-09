@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{FormeError, PromptKey, State};
 use crate::prompt_registry::Registry;
-use crate::transition::{Action, TransitionTable};
+use crate::transition::{Action, Transition, TransitionTable};
 
 /// Prompt coverage for a transition table: which `Llm` rows have a prompt,
 /// which are missing one, and which rows were skipped (never need one).
@@ -34,6 +34,28 @@ impl CoverageReport {
     pub fn is_complete(&self) -> bool {
         self.missing.is_empty()
     }
+
+    /// `" (skipped: key [action], ...)"`, or `""` when nothing was skipped.
+    fn skipped_suffix(&self) -> String {
+        if self.skipped.is_empty() {
+            return String::new();
+        }
+        let listed: Vec<String> = self
+            .skipped
+            .iter()
+            .map(|(key, action)| format!("{key} [{action}]"))
+            .collect();
+        format!(" (skipped: {})", listed.join(", "))
+    }
+
+    /// Missing keys as one comma-separated string, in canonical order.
+    fn missing_list(&self) -> String {
+        self.missing
+            .iter()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 impl fmt::Display for CoverageReport {
@@ -41,26 +63,18 @@ impl fmt::Display for CoverageReport {
         if self.missing.is_empty() {
             write!(
                 f,
-                "prompt coverage complete: {}/{} Llm rows covered",
-                self.covered, self.checked
-            )?;
-            if !self.skipped.is_empty() {
-                let skipped: Vec<String> = self
-                    .skipped
-                    .iter()
-                    .map(|(key, action)| format!("{key} [{action}]"))
-                    .collect();
-                write!(f, " (skipped: {})", skipped.join(", "))?;
-            }
-            Ok(())
+                "prompt coverage complete: {}/{} Llm rows covered{}",
+                self.covered,
+                self.checked,
+                self.skipped_suffix()
+            )
         } else {
-            let missing: Vec<String> = self.missing.iter().map(|key| key.to_string()).collect();
             write!(
                 f,
                 "prompt coverage incomplete: {}/{} Llm rows covered; missing: {}",
                 self.covered,
                 self.checked,
-                missing.join(", ")
+                self.missing_list()
             )
         }
     }
@@ -79,19 +93,40 @@ pub fn check_prompt_coverage<S: State, R: Registry>(
         ..CoverageReport::default()
     };
     for (key, transition) in table.entries() {
-        match transition.action {
-            Action::Llm => {
-                report.checked += 1;
-                if lookup_status(registry, &key)? {
-                    report.covered += 1;
-                } else {
-                    report.missing.push(key);
-                }
-            }
-            action => report.skipped.push((key, action)),
-        }
+        classify_row(&mut report, registry, key, transition)?;
     }
     Ok(report)
+}
+
+/// Classify one row: an `Llm` row is looked up, anything else is skipped.
+fn classify_row<S: State, R: Registry>(
+    report: &mut CoverageReport,
+    registry: &R,
+    key: PromptKey,
+    transition: Transition<S>,
+) -> Result<(), FormeError> {
+    match transition.action {
+        Action::Llm => record_llm_row(report, registry, key),
+        action => {
+            report.skipped.push((key, action));
+            Ok(())
+        }
+    }
+}
+
+/// Count one `Llm` row as covered or missing, by registry lookup.
+fn record_llm_row<R: Registry>(
+    report: &mut CoverageReport,
+    registry: &R,
+    key: PromptKey,
+) -> Result<(), FormeError> {
+    report.checked += 1;
+    if lookup_status(registry, &key)? {
+        report.covered += 1;
+        return Ok(());
+    }
+    report.missing.push(key);
+    Ok(())
 }
 
 /// Look one key up: `Ok(true)` — prompt present; `Ok(false)` — not found;
@@ -172,6 +207,38 @@ mod tests {
                 &BotEvent::RefundRequested,
                 Transition::halt(BotState::Done),
             )
+    }
+
+    /// The three `Llm` rows used by the determinism and mid-scan-error
+    /// tests, in canonical-key order.
+    fn three_llm_rows() -> Vec<(BotState, BotEvent, BotState)> {
+        vec![
+            (
+                BotState::CollectingInfo,
+                BotEvent::InfoProvided("order #1".to_string()),
+                BotState::Resolving,
+            ),
+            (
+                BotState::Greeting,
+                BotEvent::UserAskedRefund,
+                BotState::CollectingInfo,
+            ),
+            (
+                BotState::Resolving,
+                BotEvent::RefundRequested,
+                BotState::Done,
+            ),
+        ]
+    }
+
+    fn table_from_rows(
+        rows: impl IntoIterator<Item = (BotState, BotEvent, BotState)>,
+    ) -> TransitionTable<BotState> {
+        let mut table = TransitionTable::new();
+        for (state, event, next) in rows {
+            table.insert(&state, &event, Transition::llm(next));
+        }
+        table
     }
 
     fn registry_with(keys: &[(&str, &str)]) -> InMemoryRegistry {
@@ -311,27 +378,12 @@ mod tests {
     // 6. mixed_table_only_llm_rows_checked
     #[test]
     fn mixed_table_only_llm_rows_checked() {
-        let table = TransitionTable::new()
-            .with(
-                &BotState::Greeting,
-                &BotEvent::UserAskedRefund,
-                Transition::llm(BotState::CollectingInfo),
-            )
-            .with(
-                &BotState::CollectingInfo,
-                &BotEvent::InfoProvided("order #1".to_string()),
-                Transition::llm(BotState::Resolving),
-            )
-            .with(
-                &BotState::Idle,
-                &BotEvent::Tick,
-                Transition::silent(BotState::Idle),
-            )
-            .with(
-                &BotState::Resolving,
-                &BotEvent::RefundRequested,
-                Transition::halt(BotState::Done),
-            );
+        // support_table's rows plus one Silent row.
+        let table = support_table().with(
+            &BotState::Idle,
+            &BotEvent::Tick,
+            Transition::silent(BotState::Idle),
+        );
         let registry = registry_with(&[("Greeting::UserAskedRefund", "refund prompt")]);
         let report = check_prompt_coverage(&table, &registry).expect("coverage check");
         assert_eq!(report.total_rows, 4);
@@ -368,22 +420,7 @@ mod tests {
     // 8. registry_error_mid_scan_propagates_no_partial_report
     #[test]
     fn registry_error_mid_scan_propagates_no_partial_report() {
-        let table = TransitionTable::new()
-            .with(
-                &BotState::CollectingInfo,
-                &BotEvent::InfoProvided("order #1".to_string()),
-                Transition::llm(BotState::Resolving),
-            )
-            .with(
-                &BotState::Greeting,
-                &BotEvent::UserAskedRefund,
-                Transition::llm(BotState::CollectingInfo),
-            )
-            .with(
-                &BotState::Resolving,
-                &BotEvent::RefundRequested,
-                Transition::llm(BotState::Done),
-            );
+        let table = table_from_rows(three_llm_rows());
         let registry = SelectiveFailRegistry {
             present: HashMap::from([(
                 PromptKey::new("CollectingInfo", "InfoProvided"),
@@ -399,38 +436,9 @@ mod tests {
     // 9. missing_list_deterministically_sorted
     #[test]
     fn missing_list_deterministically_sorted() {
-        let reverse = TransitionTable::new()
-            .with(
-                &BotState::Resolving,
-                &BotEvent::RefundRequested,
-                Transition::llm(BotState::Done),
-            )
-            .with(
-                &BotState::Greeting,
-                &BotEvent::UserAskedRefund,
-                Transition::llm(BotState::CollectingInfo),
-            )
-            .with(
-                &BotState::CollectingInfo,
-                &BotEvent::InfoProvided("order #1".to_string()),
-                Transition::llm(BotState::Resolving),
-            );
-        let forward = TransitionTable::new()
-            .with(
-                &BotState::CollectingInfo,
-                &BotEvent::InfoProvided("order #1".to_string()),
-                Transition::llm(BotState::Resolving),
-            )
-            .with(
-                &BotState::Greeting,
-                &BotEvent::UserAskedRefund,
-                Transition::llm(BotState::CollectingInfo),
-            )
-            .with(
-                &BotState::Resolving,
-                &BotEvent::RefundRequested,
-                Transition::llm(BotState::Done),
-            );
+        let rows = three_llm_rows();
+        let reverse = table_from_rows(rows.iter().rev().cloned());
+        let forward = table_from_rows(rows);
         let registry = registry_with(&[("Greeting::UserAskedRefund", "refund prompt")]);
         let expected_missing = vec![
             PromptKey::new("CollectingInfo", "InfoProvided"),
