@@ -135,7 +135,7 @@ fn denied_tool_for(state: &SupportState) -> ToolId {
 }
 
 fn main() {
-    // ── Registry (exactly 3 entries, one per transition that steps) ─────────
+    // ── Registry (exactly 2 entries — the Halt row never steps) ────────────
     let mut map: HashMap<PromptKey, String> = HashMap::new();
     map.insert(
         PromptKey::new("Greeting", "UserAskedRefund"),
@@ -151,14 +151,6 @@ fn main() {
          order ID or reason. Do not refund yet. Keep tone supportive."
             .into(),
     );
-    map.insert(
-        PromptKey::new("Resolving", "RefundRequested"),
-        "You are in RESOLVING. User explicitly requested refund. \
-         Verify eligibility via read_profile/read_order, then use process_refund \
-         if allowed. Summarize outcome clearly."
-            .into(),
-    );
-
     let registry = Arc::new(InMemoryRegistry::new(map));
 
     // ── Context builder (ParagraphBuilder prose, N=2) ────────────────────────
@@ -180,10 +172,6 @@ fn main() {
             "Thanks for the info. I’ve checked your profile and order. \
              Could you confirm the order ID and reason? (ask_clarification) \
              [collecting_info]"
-                .to_string()
-        } else if lower.contains("resolving") {
-            "Refund eligible. I have processed your refund of $42.50 via \
-             process_refund. You’ll see it in 3-5 days. [resolving]"
                 .to_string()
         } else {
             format!(

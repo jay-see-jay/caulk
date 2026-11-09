@@ -61,11 +61,11 @@ where
 impl<S, E, R, B, P, L, C> fmt::Debug for SessionDriver<S, E, R, B, P, L, C>
 where
     S: State + fmt::Debug,
-    E: Event + fmt::Debug,
-    R: Registry + fmt::Debug,
-    B: ContextBuilder<E> + fmt::Debug,
-    P: Policy<S> + fmt::Debug,
-    L: LlmAdapter<E> + fmt::Debug,
+    E: Event,
+    R: Registry,
+    B: ContextBuilder<E>,
+    P: Policy<S>,
+    L: LlmAdapter<E>,
     C: Checkpointer<S>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,7 +74,7 @@ where
             .field("halted", &self.halted)
             .field("history_len", &self.history.len())
             .field("table_len", &self.table.len())
-            .field("runner", &self.runner)
+            .field("runner", &std::any::type_name::<Runner<S, E, R, B, P, L>>())
             .field("checkpointer", &std::any::type_name::<C>())
             .finish()
     }
@@ -642,10 +642,8 @@ mod tests {
         block_on(driver.dispatch(&BotEvent::UserAskedRefund)).expect("dispatch 1");
         block_on(driver.dispatch(&BotEvent::InfoProvided("order #1".into()))).expect("dispatch 2");
         let runner2 = runner_from(&parts, MockLlm::with_response("canned"));
-        let mut resumed = match BotDriver::resume(runner2, support_table(), cp.clone()) {
-            Ok(driver) => driver,
-            Err(err) => panic!("resume should succeed, got {err}"),
-        };
+        let mut resumed =
+            BotDriver::resume(runner2, support_table(), cp.clone()).expect("resume ok");
         assert_eq!(*resumed.current_state(), BotState::Resolving);
         assert!(resumed.history().is_empty());
         assert!(!resumed.is_halted());
@@ -659,10 +657,8 @@ mod tests {
     fn resume_with_no_checkpoint_errors() {
         let parts = parts();
         let runner = runner_from(&parts, MockLlm::with_response("canned"));
-        let err = match BotDriver::resume(runner, support_table(), InMemoryCheckpointer::new()) {
-            Ok(_) => panic!("resume should fail with no checkpoint"),
-            Err(err) => err,
-        };
+        let err = BotDriver::resume(runner, support_table(), InMemoryCheckpointer::new())
+            .expect_err("no checkpoint");
         assert!(matches!(err, FormeError::InvalidInput(_)));
         assert!(err.to_string().contains("no checkpoint"), "err was: {err}");
     }
@@ -684,10 +680,7 @@ mod tests {
         );
         block_on(driver.dispatch(&BotEvent::RefundRequested)).expect("halt ok");
         let runner2 = runner_from(&parts, MockLlm::with_response("canned"));
-        let resumed = match BotDriver::resume(runner2, support_table(), cp.clone()) {
-            Ok(driver) => driver,
-            Err(err) => panic!("resume should succeed, got {err}"),
-        };
+        let resumed = BotDriver::resume(runner2, support_table(), cp.clone()).expect("resume ok");
         assert_eq!(*resumed.current_state(), BotState::Done);
         // Halt is not persisted (§3.6): resume returns a fresh, non-halted driver.
         assert!(!resumed.is_halted());
