@@ -943,6 +943,7 @@ mod tests {
         assert_eq!(prepared.score, None);
         let out = block_on(runner.step(&state, &event, &[])).unwrap();
         assert!(!out.prompt_missing);
+        assert_eq!(out.prompt, "you are idle, respond to user");
         assert_eq!(out.llm_response, "canned answer");
 
         // (ii) escalate scorer
@@ -955,6 +956,7 @@ mod tests {
         assert_eq!(prepared.score, Some(Score::new(Verdict::Escalate, 1.0)));
         let out = block_on(runner.step(&state, &event, &[])).unwrap();
         assert!(!out.prompt_missing);
+        assert_eq!(out.prompt, "you are idle, respond to user");
         assert_eq!(out.llm_response, "canned answer");
     }
 
