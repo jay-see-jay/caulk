@@ -166,6 +166,9 @@ pub enum FormeError {
 
     #[error("invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("no transition for {0}")]
+    TransitionMiss(PromptKey),
 }
 
 impl FormeError {
@@ -175,6 +178,10 @@ impl FormeError {
 
     pub fn is_denied(&self) -> bool {
         matches!(self, Self::PolicyDenied(_))
+    }
+
+    pub fn is_transition_miss(&self) -> bool {
+        matches!(self, Self::TransitionMiss(_))
     }
 }
 
@@ -331,6 +338,22 @@ mod tests {
             "msg {msg} should contain key {key}"
         );
         assert!(err.is_not_found());
+        assert!(!err.is_denied());
+    }
+
+    // 7b. error_display_transition_miss (contains canonical key)
+    #[test]
+    fn error_display_transition_miss() {
+        let key = PromptKey::new("Idle", "UserMsg");
+        let err = FormeError::TransitionMiss(key.clone());
+        let msg = err.to_string();
+        assert!(msg.contains("no transition for"), "msg was: {msg}");
+        assert!(
+            msg.contains(&key.to_string()),
+            "msg {msg} should contain key {key}"
+        );
+        assert!(err.is_transition_miss());
+        assert!(!err.is_not_found());
         assert!(!err.is_denied());
     }
 
