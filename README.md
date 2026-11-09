@@ -9,10 +9,10 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 ## Quick start
 
 ```bash
-cargo test --lib                # 111 unit tests, core + registry + policy + runtime + scorer + transition
+cargo test --lib                # 135 unit tests, core + registry + policy + runtime + scorer + transition + driver
 cargo run --example hello_world # Idle/Done FSM demo with MockLlm, no network
-cargo run --example support_bot # 3-state refund FSM, policy deny demo
-cargo run --bin qa_runner       # replay determinism + policy deny + snapshot
+cargo run --example support_bot # 3-state refund FSM, policy deny demo (now driven by `SessionDriver`)
+cargo run --bin qa_runner       # replay determinism + policy deny + snapshot + driver check (5 checks)
 cargo doc --no-deps             # public API leak check
 cargo fmt --check && cargo clippy -- -D warnings
 ```
@@ -51,7 +51,7 @@ use std::{collections::HashMap, sync::Arc};
   - `forme_next_to_gf(action, eager)` helper for `ContinueAndExecute` opt
   - enable with `--features graph-flow` (`graph-flow = 0.6`)
 
-Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 111, `--features rig,graph-flow` 116.
+Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 135, `--features rig,graph-flow` 140.
 
 ### Generic design
 
@@ -62,6 +62,7 @@ Both together: `--features rig,graph-flow` or `--features full`. All tests pass:
 - `Policy<S>`: `AllowAllPolicy`, `DenyListPolicy`, `AllowListPolicy`, or custom per-state allowlist (see `support_bot`)
 - `LlmAdapter<E>`: async trait `call(prompt, context) -> String`, `MockLlm` with canned or closure
 - `Runner<S,E,R,B,P,L>`: deterministic `prepare` (pure) + `step` (async LLM), `handle_edge` for graph-flow
+- `SessionDriver<S,E,R,B,P,L,C>`: owns `Runner` + `TransitionTable` + `Checkpointer` + current state + halted flag + history; `dispatch(event) -> DispatchOutput` resolves the transition before stepping, steps the current state, persists the next state; `Silent` skips `step` entirely, `Halt` is terminal, `prompt_missing` surfaces verbatim in the output.
 
 ## Build waves (BFS)
 
@@ -72,6 +73,7 @@ Both together: `--features rig,graph-flow` or `--features full`. All tests pass:
 - Wave 4: examples (`hello_world`, `support_bot`) + `qa_runner` + fixtures/snapshots (80+ total lib tests)
 - Wave 5: rig real adapters (`RigModelAdapter`, `ClosureAdapter`, `RigAgentAdapter`, `RigAgentFactory`) + graph-flow (`FormeGraphBuilder`, `FormeTask`, `FormeLlmTask`, `NextAction` conversion) — feature-gated, MockLlm non-breaking, 85 tests with `rig,graph-flow`
 - Wave 6: transition module — pure `(state, event) -> (next_state, action)` function + `TransitionTable` keyed by `PromptKey`, explicit `TransitionMiss` error, deterministic sorted `keys()`/`entries()` (111 lib tests, 116 with `rig,graph-flow`)
+- Wave 7: session driver — `SessionDriver` + `DispatchOutput`, transition-before-step, persistence round-trip, dispatch-after-halt error, `session-driver-flow` diagram (135 lib tests, 140 with `rig,graph-flow`)
 
 Each wave must pass `cargo test` before next.
 
@@ -89,6 +91,7 @@ Each wave must pass `cargo test` before next.
 ```
 src/
   core/          # Event/State/PromptKey/ToolId/FormeError
+  driver/        # SessionDriver, DispatchOutput
   prompt_registry/ # Registry trait + FsRegistry + InMemoryRegistry
   policy/        # Policy trait + implementations
   context_builder/ # Noop, FileSnippet, Paragraph
@@ -104,6 +107,9 @@ tests/
     prompts/        # FsRegistry integration
   snapshots/
     hello-world.txt # expected hello_world output
+docs/
+  diagrams/
+    session-driver-flow.excalidraw # session driver flow diagram
 ```
 
 See also: `../forme-BLUEPRINT.md` for spec.

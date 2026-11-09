@@ -15,9 +15,9 @@
 //! one key. `Display` must therefore stay stable (already required by
 //! `core`); this is a documented precondition, not an enforced one.
 //!
-//! # NextAction mapping (for the driver, 001c — not done here)
+//! # NextAction mapping (for the driver, 001c — see `crate::driver`)
 //!
-//! * `{next_state == current, Llm}` ≡ `Next` / `Continue`
+//! * `{next_state == current, Llm}` ≡ `Next` (the driver emits `Next`, never `Continue`)
 //! * `{next_state != current, Llm}` ≡ `Transition(next_state)`
 //! * `{_, Halt}` ≡ `Halt`
 //! * `{_, Silent}` has no `NextAction` equivalent — skip `Runner::step`

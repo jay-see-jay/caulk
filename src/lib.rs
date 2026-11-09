@@ -8,6 +8,7 @@
 
 pub mod context_builder;
 pub mod core;
+pub mod driver;
 pub mod graph_flow_adapter;
 pub mod persistence;
 pub mod policy;
@@ -18,6 +19,7 @@ pub mod scorer;
 pub mod transition;
 
 pub use core::{Event, FormeError, PromptKey, State, ToolId};
+pub use driver::{DispatchOutput, SessionDriver};
 pub use runtime::{NextAction, Runner, StepOutput, ToolPlan};
 pub use scorer::{AlwaysEscalateScorer, AlwaysSilentScorer, MockScorer, Score, Scorer, Verdict};
 pub use transition::{transition, Action, Transition, TransitionMiss, TransitionTable};

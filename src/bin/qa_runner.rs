@@ -8,15 +8,18 @@
 //!   * policy deny via AllowListPolicy denying "refund" in Greeting
 //!   * replay determinism (prepare twice same output)
 //!   * snapshot comparison reading `tests/snapshots/hello-world.txt`
+//!   * driver check (SessionDriver dispatch, halt, resume, dispatch-after-halt)
 //! - Prints PASS/FAIL per check and overall
 //! - Exit 0 on success
 
 use caulk::context_builder::NoopBuilder;
 use caulk::core::{FormeError, PromptKey, ToolId};
+use caulk::persistence::{Checkpointer, InMemoryCheckpointer};
 use caulk::policy::{AllowAllPolicy, AllowListPolicy, Policy};
 use caulk::prompt_registry::{InMemoryRegistry, Registry};
 use caulk::rig_adapter::MockLlm;
-use caulk::Runner;
+use caulk::transition::{Action, Transition, TransitionTable};
+use caulk::{NextAction, Runner, SessionDriver};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -402,6 +405,176 @@ fn main() {
                 println!("FAIL {name} (inline assert failed)");
                 failed += 1;
             }
+        }
+    }
+
+    // ── Check 5: driver check ─────────────────────────────────────────────
+    {
+        let name = "driver_check";
+        let mut ok = true;
+        let table = TransitionTable::new()
+            .with(
+                &AppState::new("Idle"),
+                &AppEvent::new("UserMsg"),
+                Transition::llm(AppState::new("Done")),
+            )
+            .with(
+                &AppState::new("Done"),
+                &AppEvent::new("UserMsg"),
+                Transition::halt(AppState::new("Done")),
+            );
+        let checkpointer = InMemoryCheckpointer::new();
+        let shared = checkpointer.clone();
+        let mut driver = SessionDriver::new(runner, table, checkpointer, AppState::new("Idle"));
+
+        // 1. Dispatch UserMsg from Idle: Llm to Done, reply, persisted.
+        if ok {
+            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
+                Ok(out) => {
+                    if out.next_state != AppState::new("Done") {
+                        eprintln!("FAIL {name}: step 1 next_state {:?}", out.next_state);
+                        ok = false;
+                    } else if out.action != Action::Llm {
+                        eprintln!("FAIL {name}: step 1 action {:?}", out.action);
+                        ok = false;
+                    } else if out.next_action != Some(NextAction::Transition(AppState::new("Done")))
+                    {
+                        eprintln!("FAIL {name}: step 1 next_action {:?}", out.next_action);
+                        ok = false;
+                    } else if out.llm_response.as_deref()
+                        != Some("Hello from caulk! This is canned reply.")
+                    {
+                        eprintln!("FAIL {name}: step 1 llm_response {:?}", out.llm_response);
+                        ok = false;
+                    } else if out.prompt_missing {
+                        eprintln!("FAIL {name}: step 1 prompt_missing should be false");
+                        ok = false;
+                    } else if *driver.current_state() != AppState::new("Done") {
+                        eprintln!("FAIL {name}: step 1 current_state not Done");
+                        ok = false;
+                    } else if !matches!(shared.load(), Ok(Some(ref s)) if *s == AppState::new("Done"))
+                    {
+                        eprintln!("FAIL {name}: step 1 checkpoint not Done");
+                        ok = false;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("FAIL {name}: step 1 dispatch error: {e}");
+                    ok = false;
+                }
+            }
+        }
+
+        // 2. Dispatch UserMsg from Done: Halt, no reply, halted, persisted.
+        if ok {
+            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
+                Ok(out) => {
+                    if out.action != Action::Halt {
+                        eprintln!("FAIL {name}: step 2 action {:?}", out.action);
+                        ok = false;
+                    } else if out.next_action != Some(NextAction::Halt) {
+                        eprintln!("FAIL {name}: step 2 next_action {:?}", out.next_action);
+                        ok = false;
+                    } else if out.llm_response.is_some() {
+                        eprintln!("FAIL {name}: step 2 llm_response should be None");
+                        ok = false;
+                    } else if out.prompt_missing {
+                        eprintln!("FAIL {name}: step 2 prompt_missing should be false");
+                        ok = false;
+                    } else if !driver.is_halted() {
+                        eprintln!("FAIL {name}: step 2 driver should be halted");
+                        ok = false;
+                    } else if !matches!(shared.load(), Ok(Some(ref s)) if *s == AppState::new("Done"))
+                    {
+                        eprintln!("FAIL {name}: step 2 checkpoint not Done");
+                        ok = false;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("FAIL {name}: step 2 dispatch error: {e}");
+                    ok = false;
+                }
+            }
+        }
+
+        // 3. Persistence round-trip: resume lands on Done, not halted, no history.
+        if ok {
+            let runner2: Runner<
+                AppState,
+                AppEvent,
+                InMemoryRegistry,
+                NoopBuilder,
+                AllowAllPolicy,
+                MockLlm,
+            > = Runner::new(
+                Arc::clone(&registry),
+                Arc::clone(&builder),
+                Arc::clone(&policy),
+                MockLlm::with_response("Hello from caulk! This is canned reply."),
+            );
+            let table2 = TransitionTable::new()
+                .with(
+                    &AppState::new("Idle"),
+                    &AppEvent::new("UserMsg"),
+                    Transition::llm(AppState::new("Done")),
+                )
+                .with(
+                    &AppState::new("Done"),
+                    &AppEvent::new("UserMsg"),
+                    Transition::halt(AppState::new("Done")),
+                );
+            match SessionDriver::resume(runner2, table2, shared.clone()) {
+                Ok(resumed) => {
+                    if *resumed.current_state() != AppState::new("Done") {
+                        eprintln!("FAIL {name}: step 3 resumed state not Done");
+                        ok = false;
+                    } else if resumed.is_halted() {
+                        // Halt is not persisted (§3.6): resume is fresh, non-halted.
+                        eprintln!("FAIL {name}: step 3 resumed driver should not be halted");
+                        ok = false;
+                    } else if !resumed.history().is_empty() {
+                        eprintln!("FAIL {name}: step 3 resumed history should be empty");
+                        ok = false;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("FAIL {name}: step 3 resume error: {e}");
+                    ok = false;
+                }
+            }
+        }
+
+        // 4. Dispatch-after-halt on the original driver errors SessionHalted.
+        if ok {
+            match block_on(driver.dispatch(&AppEvent::new("UserMsg"))) {
+                Ok(out) => {
+                    eprintln!("FAIL {name}: step 4 dispatch should error, got {out:?}");
+                    ok = false;
+                }
+                Err(e) => {
+                    if !e.is_session_halted() {
+                        eprintln!("FAIL {name}: step 4 error not SessionHalted: {e}");
+                        ok = false;
+                    } else if *driver.current_state() != AppState::new("Done") {
+                        eprintln!("FAIL {name}: step 4 state moved from Done");
+                        ok = false;
+                    } else if driver.history().len() != 2 {
+                        eprintln!(
+                            "FAIL {name}: step 4 history len {} != 2",
+                            driver.history().len()
+                        );
+                        ok = false;
+                    }
+                }
+            }
+        }
+
+        if ok {
+            println!("PASS {name} (dispatch + halt + resume + dispatch-after-halt)");
+            passed += 1;
+        } else {
+            println!("FAIL {name}");
+            failed += 1;
         }
     }
 
