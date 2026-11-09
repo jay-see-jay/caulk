@@ -9,7 +9,7 @@ Thin generic runtime between `rig-core` (LLM) and `graph-flow` (execution).
 ## Quick start
 
 ```bash
-cargo test --lib                # 80 unit tests, core + registry + policy + runtime
+cargo test --lib                # 94 unit tests, core + registry + policy + runtime + scorer
 cargo run --example hello_world # Idle/Done FSM demo with MockLlm, no network
 cargo run --example support_bot # 3-state refund FSM, policy deny demo
 cargo run --bin qa_runner       # replay determinism + policy deny + snapshot
@@ -51,7 +51,7 @@ use std::{collections::HashMap, sync::Arc};
   - `forme_next_to_gf(action, eager)` helper for `ContinueAndExecute` opt
   - enable with `--features graph-flow` (`graph-flow = 0.6`)
 
-Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 80, `--features rig,graph-flow` 85.
+Both together: `--features rig,graph-flow` or `--features full`. All tests pass: `cargo test --lib` 94, `--features rig,graph-flow` 99.
 
 ### Generic design
 
