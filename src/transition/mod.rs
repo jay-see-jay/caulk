@@ -71,14 +71,17 @@ impl<S: State> Transition<S> {
         Self { next_state, action }
     }
 
+    /// Resolve to `next_state` and call the LLM for it.
     pub fn llm(next_state: S) -> Self {
         Self::new(next_state, Action::Llm)
     }
 
+    /// Resolve to `next_state` with no LLM call and no output.
     pub fn silent(next_state: S) -> Self {
         Self::new(next_state, Action::Silent)
     }
 
+    /// Resolve to `next_state` and halt: no further dispatch.
     pub fn halt(next_state: S) -> Self {
         Self::new(next_state, Action::Halt)
     }
@@ -181,13 +184,13 @@ impl<S: State> TransitionTable<S> {
 
     /// All `(key, transition)` pairs, sorted by canonical key.
     pub fn entries(&self) -> Vec<(PromptKey, Transition<S>)> {
-        self.keys()
-            .into_iter()
-            .map(|key| {
-                let transition = self.entries.get(&key).expect("key from keys()").clone();
-                (key, transition)
-            })
-            .collect()
+        let mut entries: Vec<(PromptKey, Transition<S>)> = self
+            .entries
+            .iter()
+            .map(|(key, transition)| (key.clone(), transition.clone()))
+            .collect();
+        entries.sort_by_key(|(key, _)| key.canonical());
+        entries
     }
 }
 
@@ -534,6 +537,7 @@ mod tests {
         assert_eq!(via_with.len(), via_insert.len());
     }
 
+    // 15. action_display_is_stable_variant_name
     #[test]
     fn action_display_is_stable_variant_name() {
         assert_eq!(Action::Llm.to_string(), "Llm");
@@ -541,6 +545,7 @@ mod tests {
         assert_eq!(Action::Halt.to_string(), "Halt");
     }
 
+    // 16. transition_miss_display
     #[test]
     fn transition_miss_display() {
         let miss = TransitionMiss::new(PromptKey::new("Idle", "UserMsg"));
