@@ -128,10 +128,9 @@ where
         }
     }
 
-    /// Dispatch one event. See the numbered algorithm in the module docs
-    /// of the spec (caulk-001c §3.1): halt guard, resolve the transition
-    /// before any LLM call, step the current state only for `Llm`,
-    /// persist the next state, then commit in memory. A save failure
+    /// Dispatch one event (caulk-001c §3.1): halt guard, resolve the
+    /// transition before any LLM call, step the current state only for
+    /// `Llm`, persist the next state, then commit in memory. A save failure
     /// leaves in-memory state, halted flag, and history untouched; the
     /// LLM call (if one happened) cannot be un-called.
     pub async fn dispatch(&mut self, event: &E) -> Result<DispatchOutput<S>, FormeError> {
@@ -186,17 +185,20 @@ where
                 trans,
                 self.run_llm(current, event).await?,
             )),
-            Action::Silent => Ok(Self::skip_output(
-                trans,
-                None,
-                PromptKey::key_for(current, event),
-            )),
-            Action::Halt => Ok(Self::skip_output(
-                trans,
-                Some(NextAction::Halt),
-                PromptKey::key_for(current, event),
-            )),
+            _ => Ok(Self::skip_output_for(current, event, trans)),
         }
+    }
+
+    /// Output for the actions that never call `step`: `Silent` has no
+    /// `NextAction` equivalent, `Halt` maps to `NextAction::Halt`. The
+    /// prompt key is the transition key, present for logging — no prompt
+    /// lookup is performed.
+    fn skip_output_for(current: &S, event: &E, trans: &Transition<S>) -> DispatchOutput<S> {
+        let next_action = match trans.action {
+            Action::Halt => Some(NextAction::Halt),
+            _ => None,
+        };
+        Self::skip_output(trans, next_action, PromptKey::key_for(current, event))
     }
 
     fn llm_output(current: &S, trans: &Transition<S>, step: StepOutput<S>) -> DispatchOutput<S> {
@@ -595,8 +597,12 @@ mod tests {
         assert_eq!(cp.load().unwrap(), None);
 
         // (b) Empty table misses everything.
+        assert_empty_table_misses(&parts);
+    }
+
+    fn assert_empty_table_misses(parts: &Parts) {
         let (mut empty, _) = make_driver(
-            &parts,
+            parts,
             TransitionTable::new(),
             MockLlm::with_response("canned"),
             BotState::Idle,
@@ -610,20 +616,21 @@ mod tests {
     #[test]
     fn deterministic_replay_same_log_same_states() {
         let first = run_support_log();
+        let (states, replies, history, halted) = (&first.0, &first.1, &first.2, first.3);
         assert_eq!(
-            first.0,
-            vec![
+            states,
+            &vec![
                 BotState::CollectingInfo,
                 BotState::Resolving,
                 BotState::Done
             ]
         );
         assert_eq!(
-            first.1,
-            vec![Some("canned".to_string()), Some("canned".to_string()), None,]
+            replies,
+            &vec![Some("canned".to_string()), Some("canned".to_string()), None,]
         );
-        assert_eq!(first.2, support_log());
-        assert!(first.3);
+        assert_eq!(history, &support_log());
+        assert!(halted);
         // Run the whole log twice more on fresh drivers: byte-identical.
         assert_eq!(run_support_log(), first);
         assert_eq!(run_support_log(), first);
@@ -796,11 +803,8 @@ mod tests {
         assert!(driver.history().is_empty());
     }
 
-    // D17. double_dispatch_same_event_advances_each_time
-    #[test]
-    fn double_dispatch_same_event_advances_each_time() {
-        let parts = parts();
-        let table = TransitionTable::new()
+    fn ping_pong_table() -> TransitionTable<BotState> {
+        TransitionTable::new()
             .with(
                 &BotState::Idle,
                 &BotEvent::UserMsg,
@@ -810,10 +814,16 @@ mod tests {
                 &BotState::Done,
                 &BotEvent::UserMsg,
                 Transition::llm(BotState::Idle),
-            );
+            )
+    }
+
+    // D17. double_dispatch_same_event_advances_each_time
+    #[test]
+    fn double_dispatch_same_event_advances_each_time() {
+        let parts = parts();
         let (mut driver, _) = make_driver(
             &parts,
-            table,
+            ping_pong_table(),
             MockLlm::with_response("canned"),
             BotState::Idle,
         );
@@ -826,16 +836,22 @@ mod tests {
         assert_eq!(driver.history().len(), 2);
     }
 
-    // D18. table_coverage_accepted_pairs_resolve
-    #[test]
-    fn table_coverage_accepted_pairs_resolve() {
-        let parts = parts();
-        let (driver, _) = make_driver(
-            &parts,
-            support_table(),
-            MockLlm::with_response("canned"),
-            BotState::Greeting,
-        );
+    /// The `(state, event)` pair behind a canonical table key. The table
+    /// only exposes keys, so the pair is recovered by matching the
+    /// canonical spelling.
+    fn pair_for_key(canonical: &str) -> (BotState, BotEvent) {
+        match canonical {
+            "CollectingInfo::InfoProvided" => (
+                BotState::CollectingInfo,
+                BotEvent::InfoProvided("order #1".into()),
+            ),
+            "Greeting::UserAskedRefund" => (BotState::Greeting, BotEvent::UserAskedRefund),
+            "Resolving::RefundRequested" => (BotState::Resolving, BotEvent::RefundRequested),
+            other => panic!("unexpected key {other}"),
+        }
+    }
+
+    fn assert_table_keys(driver: &BotDriver) {
         let canonical: Vec<String> = driver
             .table()
             .keys()
@@ -850,16 +866,21 @@ mod tests {
                 "Resolving::RefundRequested",
             ]
         );
+    }
+
+    // D18. table_coverage_accepted_pairs_resolve
+    #[test]
+    fn table_coverage_accepted_pairs_resolve() {
+        let parts = parts();
+        let (driver, _) = make_driver(
+            &parts,
+            support_table(),
+            MockLlm::with_response("canned"),
+            BotState::Greeting,
+        );
+        assert_table_keys(&driver);
         for key in driver.table().keys() {
-            let (state, event) = match key.canonical().as_str() {
-                "CollectingInfo::InfoProvided" => (
-                    BotState::CollectingInfo,
-                    BotEvent::InfoProvided("order #1".into()),
-                ),
-                "Greeting::UserAskedRefund" => (BotState::Greeting, BotEvent::UserAskedRefund),
-                "Resolving::RefundRequested" => (BotState::Resolving, BotEvent::RefundRequested),
-                other => panic!("unexpected key {other}"),
-            };
+            let (state, event) = pair_for_key(&key.canonical());
             assert!(
                 transition(driver.table(), &state, &event).is_ok(),
                 "{key} should resolve"
